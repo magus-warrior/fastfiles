@@ -69,4 +69,10 @@ else
     "${VENV_DIR}/bin/fastfiles" --check
 fi
 
+if [[ "${INSTALL_TARGET}" == *'[desktop]' ]]; then
+    info "Adding FastFiles to the application launcher"
+    "${VENV_DIR}/bin/python" "${SCRIPT_DIR}/scripts/install_launcher.py"
+    printf '\nYou can now open FastFiles from your application launcher.\n'
+fi
+
 printf '\n\033[1;32mFastFiles is ready.\033[0m Start it with:\n  %s/start.sh\n\n' "${SCRIPT_DIR}"

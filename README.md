@@ -41,9 +41,15 @@ The easiest setup is:
 ```
 
 The installer creates an isolated `.venv`, installs or updates FastFiles, checks
-the dependencies, and runs the test suite. It is safe to run again after pulling
+the dependencies, runs the test suite, and adds **FastFiles** to your application
+launcher (desktop installs only). It is safe to run again after pulling
 an update. Arguments passed to `start.sh` are forwarded to FastFiles, so an
 always-on locker can also be started with `./start.sh --serve`.
+
+To add or refresh the launcher for an existing installation without reinstalling,
+run `.venv/bin/python scripts/install_launcher.py`. The entry is installed for
+your user in `${XDG_DATA_HOME:-~/.local/share}/applications/fastfiles.desktop`.
+Keep this checkout in place; rerun the installer if you move it.
 
 Manual setup is equivalent to:
 

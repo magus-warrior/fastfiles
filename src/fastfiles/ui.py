@@ -8,7 +8,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QDir, QObject, QProcess, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -1179,14 +1179,25 @@ class MainWindow(QMainWindow):
         self._update_destination_preview()
 
     def _choose_files(self) -> None:
-        files, _ = QFileDialog.getOpenFileNames(self, "Choose files to send")
-        self._add_paths(files)
+        dialog = self._path_dialog("Choose files to send", QFileDialog.FileMode.ExistingFiles)
+        if dialog.exec() == QFileDialog.DialogCode.Accepted:
+            self._add_paths(dialog.selectedFiles())
+
+    def _path_dialog(self, title: str, mode: QFileDialog.FileMode) -> QFileDialog:
+        dialog = QFileDialog(self, title)
+        # Native pickers can ignore Qt's hidden-entry filter.
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dialog.setFileMode(mode)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly, mode == QFileDialog.FileMode.Directory)
+        dialog.setFilter(dialog.filter() | QDir.Filter.Hidden)
+        return dialog
 
     def _choose_folder(self) -> None:
         title = "Choose local destination" if self.direction is Direction.RECEIVE else "Choose folder to send"
-        folder = QFileDialog.getExistingDirectory(self, title)
-        if not folder:
+        dialog = self._path_dialog(title, QFileDialog.FileMode.Directory)
+        if dialog.exec() != QFileDialog.DialogCode.Accepted:
             return
+        folder = dialog.selectedFiles()[0]
         if self.direction is Direction.RECEIVE:
             self._local_paths = [folder]
             self.paths.clear()

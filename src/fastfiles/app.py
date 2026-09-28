@@ -86,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
+        from PySide6.QtGui import QIcon
         from PySide6.QtWidgets import QApplication
         from qt_material import apply_stylesheet
     except ImportError:
@@ -99,6 +100,8 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("FastFiles")
+    app.setDesktopFileName("fastfiles")
+    app.setWindowIcon(QIcon.fromTheme("folder-remote"))
     app.setOrganizationName("FastFiles")
     apply_stylesheet(
         app,
