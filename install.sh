@@ -3,6 +3,13 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${SCRIPT_DIR}/.venv"
+INSTALL_TARGET="${SCRIPT_DIR}[desktop]"
+if [[ "${1:-}" == "--headless" ]]; then
+    INSTALL_TARGET="${SCRIPT_DIR}"
+elif [[ "$#" -gt 0 ]]; then
+    printf 'Usage: %s [--headless]\n' "$0" >&2
+    exit 2
+fi
 
 info() {
     printf '\n\033[1;36mFastFiles:\033[0m %s\n' "$1"
@@ -32,11 +39,21 @@ fi
 
 info "Installing FastFiles and its dependencies"
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip
-"${VENV_DIR}/bin/python" -m pip install --editable "${SCRIPT_DIR}"
+"${VENV_DIR}/bin/python" -m pip install --editable "${INSTALL_TARGET}"
 
 info "Checking the installation"
 "${VENV_DIR}/bin/python" -m pip check
-"${VENV_DIR}/bin/python" -m unittest discover -s "${SCRIPT_DIR}/tests" -v
+if [[ "${INSTALL_TARGET}" == *'[desktop]' ]]; then
+    QT_QPA_PLATFORM=offscreen "${VENV_DIR}/bin/python" - <<'PY' || fail \
+        "The desktop runtime could not load. Check the Qt/OpenGL libraries installed by your Linux distribution."
+from PySide6.QtWidgets import QApplication
+from qt_material import apply_stylesheet
+app = QApplication([])
+apply_stylesheet(app, theme="light_blue.xml", invert_secondary=True)
+print("Desktop runtime is ready.")
+PY
+fi
+QT_QPA_PLATFORM=offscreen "${VENV_DIR}/bin/python" -m unittest discover -s "${SCRIPT_DIR}/tests" -v
 
 missing_tools=()
 for tool in ssh rsync; do
@@ -53,4 +70,3 @@ else
 fi
 
 printf '\n\033[1;32mFastFiles is ready.\033[0m Start it with:\n  %s/start.sh\n\n' "${SCRIPT_DIR}"
-

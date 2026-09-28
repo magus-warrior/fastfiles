@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-import json
-import os
+import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .core import normalize_remote_path, validate_host
+from .locker import parse_peer_address
+from .storage import config_dir, read_json, write_json
 
-def config_dir() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME")
-    return Path(base) / "fastfiles" if base else Path.home() / ".config" / "fastfiles"
+logger = logging.getLogger("fastfiles.profiles")
+
+
+def _name(value: str) -> None:
+    if not isinstance(value, str) or not value.strip() or any(c in value for c in "\r\n\0"):
+        raise ValueError("Profile aliases must be nonempty text")
 
 
 @dataclass(frozen=True)
@@ -17,12 +22,28 @@ class DirectProfile:
     host: str
     remote_path: str
 
+    def __post_init__(self) -> None:
+        _name(self.name)
+        if not isinstance(self.host, str) or not isinstance(self.remote_path, str):
+            raise ValueError("Host and remote path must be text")
+        validate_host(self.host)
+        normalize_remote_path(self.remote_path)
+
 
 @dataclass(frozen=True)
 class PeerProfile:
     name: str
     address: str
     port: int
+
+    def __post_init__(self) -> None:
+        _name(self.name)
+        if not isinstance(self.address, str) or type(self.port) is not int:
+            raise ValueError("Invalid saved peer address or port")
+        address = f"[{self.address}]" if ":" in self.address else self.address
+        parsed = parse_peer_address(f"{address}:{self.port}")
+        if parsed.address != self.address:
+            raise ValueError("Save only the peer hostname or IP in address")
 
     @property
     def secret_id(self) -> str:
@@ -35,17 +56,23 @@ class ProfileStore:
 
     def _read(self) -> dict:
         try:
-            value = json.loads(self.path.read_text(encoding="utf-8"))
-            return value if isinstance(value, dict) else {}
-        except (FileNotFoundError, OSError, ValueError):
+            value = read_json(self.path)
+        except FileNotFoundError:
             return {}
+        for key, kind in (("direct", DirectProfile), ("peers", PeerProfile)):
+            entries = value.get(key, [])
+            if not isinstance(entries, list):
+                raise ValueError(f"{key} must be a list in {self.path}")
+            try:
+                profiles = [kind(**entry) for entry in entries]
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"Invalid saved connection in {self.path}; file left unchanged") from error
+            if len({profile.name for profile in profiles}) != len(profiles):
+                raise ValueError(f"Duplicate aliases in {self.path}")
+        return value
 
     def _write(self, value: dict) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-        temporary.chmod(0o600)
-        temporary.replace(self.path)
+        write_json(self.path, value)
 
     def direct(self) -> list[DirectProfile]:
         result = []
@@ -99,25 +126,31 @@ class SecretStore:
     def available() -> bool:
         try:
             import keyring
-            keyring.get_keyring().priority
-            return True
+
+            return keyring.get_keyring().priority > 0
         except Exception:
             return False
 
     def get(self, key: str) -> str:
         try:
             import keyring
+
             return keyring.get_password(self.service, key) or ""
         except Exception:
             return ""
 
     def set(self, key: str, value: str) -> None:
         import keyring
+
+        backend = keyring.get_keyring()
+        if backend.priority <= 0 or "plaintext" in type(backend).__name__.lower():
+            raise RuntimeError("No secure system keyring is available; the code will not be saved")
         keyring.set_password(self.service, key, value)
 
     def delete(self, key: str) -> None:
         try:
             import keyring
+
             keyring.delete_password(self.service, key)
-        except Exception:
-            pass
+        except Exception as error:
+            logger.warning("Could not remove keyring entry: %s", type(error).__name__)

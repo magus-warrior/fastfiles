@@ -11,3 +11,5 @@ build/
 config.json
 connections.json
 *.log
+*.log.*
+.ruff_cache/

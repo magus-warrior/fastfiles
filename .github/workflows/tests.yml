@@ -1,0 +1,36 @@
+name: Tests
+on: [push, pull_request]
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    strategy:
+      matrix:
+        python: ['3.10', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: sudo apt-get update && sudo apt-get install -y rsync libegl1 libopengl0
+      - run: python -m pip install -e '.[desktop,dev]'
+      - run: python -m pip check
+      - run: ruff check src tests
+      - run: python -c "from PySide6.QtWidgets import QApplication; from fastfiles.ui import MainWindow; app = QApplication([])"
+      - run: python -m unittest discover -s tests -v
+        env:
+          QT_QPA_PLATFORM: offscreen
+  headless:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m pip install -e .
+      - run: python -m unittest discover -s tests -v
+      - run: python -c "import importlib.util; assert importlib.util.find_spec('PySide6') is None"

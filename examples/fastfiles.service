@@ -1,0 +1,17 @@
+[Unit]
+Description=FastFiles headless locker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust these paths to your checkout. Initialize and review the config first.
+WorkingDirectory=%h/fastfiles
+ExecStart=%h/fastfiles/.venv/bin/fastfiles --serve
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
