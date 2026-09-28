@@ -4,6 +4,9 @@ FastFiles is a Linux-first desktop app for sending files and folders over SSH. I
 uses the tools administrators already trust: `rsync` for transfers and your normal
 OpenSSH configuration for hosts, keys, jump hosts, ports, and agents.
 
+**Free for personal, noncommercial use.** Business and organizational use requires
+a separate paid license. See [Licensing](#licensing).
+
 ## Transfers
 
 - Send one or more local files or a directory to a remote machine
@@ -229,12 +232,21 @@ real lossy networks still need platform testing. The locker directory must be
 owned by a trusted local account; it is not a sandbox against another local
 process changing the filesystem while a request is running.
 
-## Licensing proposal
+## Licensing
 
-The proposed model is free noncommercial source access plus a paid commercial
-license. [The licensing recommendation](docs/licensing.md) describes PolyForm
-Noncommercial and the remaining decisions. It is a proposal, not an adopted
-license or permission grant.
+FastFiles is **source available and free for personal, noncommercial use** under
+the [FastFiles Personal Use License 1.0](LICENSE). You may inspect, modify, and
+share it without charge under those terms.
+
+Business, commercial, professional, and other organizational use requires a
+**separate paid license**, including internal use that does not generate revenue.
+Contact [magus-warrior, the repository owner](https://github.com/magus-warrior)
+through [the repository](https://github.com/magus-warrior/fastfiles) to discuss
+licensing before using FastFiles for those purposes.
+
+This is not an OSI-approved open-source license: the personal-use restriction
+excludes commercial use. See [licensing details](docs/licensing.md) for examples
+and third-party dependency information.
 
 FastFiles currently assumes rsync is present at both ends. A future transport
 adapter can add SFTP fallback for Windows machines that only expose OpenSSH.

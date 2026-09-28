@@ -1,28 +1,40 @@
-# Licensing recommendation (proposal only)
+# Licensing
 
-Use **PolyForm Noncommercial 1.0.0** for free noncommercial use and offer a
-separate paid commercial license for business use. The public license permits
-noncommercial use, modification, and redistribution. Commercial rights come
-from the separate agreement with the copyright holder.
-[Official license text](https://polyformproject.org/licenses/noncommercial/1.0.0)
+FastFiles uses the [FastFiles Personal Use License 1.0](../LICENSE), a custom
+source-available license. The LICENSE file contains the controlling terms.
+Copyright holder: **magus-warrior**.
 
-Describe this as **source available, free for noncommercial use**. Open source
-licenses must permit commercial use; an MIT, GPL, or AGPL label cannot enforce
-a rule that commercial users always pay.
-[OSI definition, section 6](https://opensource.org/osd)
+## Free personal use
 
-PolyForm explicitly permits some organizations, including education, charities,
-public research, and government institutions. Confirm that these exceptions fit
-the intended business model before adopting the license. If every organization
-must pay, a reviewed custom agreement would be needed instead.
+Individuals may use, inspect, modify, and share FastFiles without charge for
+private, noncommercial purposes. Examples include transferring personal photos
+between home computers, running a personal home lab, and learning from the code.
+Redistributed copies and forks must retain the license and notices; modified
+copies must be identified as modified. The same personal-use limits apply.
 
-This file does not adopt PolyForm, set prices, or grant a license. Before adding
-LICENSE and publishing licensing claims, identify the copyright holder, approve
-the free-use scope, and establish commercial contact details and terms (such as
-per-user/per-device coverage, redistribution, support, and upgrades). Obtain
-appropriate rights for future contributions if they must also be offered under
-the commercial agreement. A licensing lawyer should review the commercial terms
-and dependency obligations before paid distribution.
+## Paid business and organizational use
+
+A separate paid written license is required before using FastFiles for work,
+a business, consulting, clients, or another organization. This includes internal
+file transfers that do not directly earn money and use by nonprofits, schools,
+and government organizations. The public license has no organizational exception.
+
+Contact [magus-warrior](https://github.com/magus-warrior) through
+[the FastFiles repository](https://github.com/magus-warrior/fastfiles) to arrange
+a license. Pricing and permitted scope are agreed separately; no purchase flow,
+support commitment, or commercial permission is implied by the public license.
+
+FastFiles is described as **source available**, because open-source licenses must
+allow commercial use. [OSI definition, section 6](https://opensource.org/osd)
+
+## Contributions
+
+Contributions must be compatible with the public license. Before incorporating
+third-party contributions into a commercially licensed version, the maintainer
+must also obtain sufficient rights from their copyright holders; the public
+personal-use license alone does not grant those commercial rights.
+
+## Third-party dependencies
 
 Third-party libraries retain their own licenses. The installed versions reviewed
 for this release report:

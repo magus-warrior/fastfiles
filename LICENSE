@@ -1,0 +1,62 @@
+FastFiles Personal Use License 1.0
+
+Copyright (c) 2026 magus-warrior. All rights reserved except as granted below.
+
+1. Scope
+
+"Software" means the FastFiles source code, documentation, and other materials
+provided under this license. "Personal Use" means use by an individual solely
+for private, noncommercial purposes, such as managing personal files, learning,
+or a hobby. It excludes use for or on behalf of a business or other organization,
+employment, professional work, consulting, client work, or any activity directed
+toward commercial advantage or monetary compensation. An organization's nonprofit
+status does not make its use Personal Use.
+
+2. Personal-use grant
+
+Subject to these terms, the copyright holder grants you a worldwide, royalty-free,
+nonexclusive license to use, copy, study, and modify the Software for Personal
+Use, and to redistribute original or modified copies without charge solely for
+recipients' Personal Use. You must include this license and all copyright and
+attribution notices with every copy or substantial portion of the Software.
+Modified copies must prominently state that they have been modified. You may not
+remove these restrictions or offer the Software under terms that permit uses
+prohibited by this license.
+
+3. Business and commercial licensing
+
+Business, commercial, professional, and other organizational use is not permitted
+under this license, including internal use even when the Software is not sold
+and does not directly generate revenue. Selling the Software, charging for
+access to it, or including it in a commercial product or service is not permitted
+under this license.
+
+Before any such use, you must purchase a separate written license from the
+copyright holder that expressly authorizes your intended use. Pricing, scope,
+and other terms are agreed separately; this license grants no commercial rights.
+Contact the repository owner, magus-warrior, through
+https://github.com/magus-warrior/fastfiles for licensing inquiries.
+
+4. Third-party materials and user files
+
+Third-party components remain governed by their own licenses. This license does
+not restrict rights granted under those licenses. It does not claim ownership
+of, or apply to, your files merely because you transfer them using the Software.
+No trademark rights are granted.
+
+5. Termination
+
+The permissions granted by this license terminate automatically if you violate
+its terms. Upon termination, you must cease using, copying, modifying, and
+distributing the Software unless the copyright holder grants permission again
+in writing.
+
+6. Disclaimer and limitation of liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE SOFTWARE IS PROVIDED
+"AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE,
+AND NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS
+BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
