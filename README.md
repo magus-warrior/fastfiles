@@ -49,6 +49,37 @@ launcher (desktop installs only). It is safe to run again after pulling
 an update. Arguments passed to `start.sh` are forwarded to FastFiles, so an
 always-on locker can also be started with `./start.sh --serve`.
 
+### Linux desktop libraries
+
+On Linux, the desktop installer detects missing XCB cursor, EGL, and OpenGL
+libraries and installs the system packages using apt, dnf, or pacman. It may ask
+for your sudo password (and package-manager confirmation). Other distributions
+receive a list of missing libraries to install manually. Headless installs skip
+these desktop packages.
+
+The desktop installer checks Qt using your current display session as well as an
+offscreen test. Without a desktop session it reports that GUI startup could not
+be verified. Python packages alone do not supply every Linux display library.
+
+If startup reports that the Qt `xcb` plugin could not load and mentions
+`xcb-cursor0`, install the cursor library for your distribution:
+
+```bash
+# Ubuntu / Debian
+sudo apt install libxcb-cursor0
+# Fedora
+sudo dnf install xcb-util-cursor
+# Arch Linux
+sudo pacman -S xcb-util-cursor
+```
+
+Then run `./start.sh` again. If it still fails, run
+`QT_DEBUG_PLUGINS=1 ./start.sh` to identify other missing libraries or display
+connection errors. See [Qt's Linux requirements](https://doc.qt.io/qt-6/linux-requirements.html).
+The `--check` command checks only SSH tools; it does not verify GUI startup.
+
+### Launcher and manual setup
+
 To add or refresh the launcher for an existing installation without reinstalling,
 run `.venv/bin/python scripts/install_launcher.py`. The entry is installed for
 your user in `${XDG_DATA_HOME:-~/.local/share}/applications/fastfiles.desktop`.

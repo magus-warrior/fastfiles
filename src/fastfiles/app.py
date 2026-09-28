@@ -19,7 +19,7 @@ def check_environment() -> int:
         return 1
     print(f"ssh: {shutil.which('ssh')}")
     print(f"rsync: {shutil.which('rsync')}")
-    print("FastFiles environment looks ready.")
+    print("Direct SSH command-line tools are ready (GUI dependencies are not checked).")
     return 0
 
 
