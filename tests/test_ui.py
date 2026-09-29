@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
-    from PySide6.QtCore import QMimeData, QPoint, QPointF, QProcess, Qt, QUrl
+    from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF, QProcess, Qt, QUrl
     from PySide6.QtGui import QDragEnterEvent, QDropEvent
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QMessageBox
@@ -21,7 +21,8 @@ try:
 except ImportError:
     HAS_UI = False
 
-from fastfiles.locker import Locker, LockerConfig, LockerHTTPServer, Peer, hash_access_code
+from fastfiles.access import new_computer_permission
+from fastfiles.locker import Locker, LockerConfig, LockerHTTPServer, Peer, PeerClient, hash_access_code
 from fastfiles.profiles import PeerProfile
 
 
@@ -76,9 +77,11 @@ class WindowTests(unittest.TestCase):
         self.wait_for(lambda: not self.window._checking_peers)
         self.window.close()
         self.app.processEvents()
+        self.window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
-    def server(self):
-        config = LockerConfig(
+    def server(self, config=None):
+        config = config or LockerConfig(
             "remote-test", "Remote test", str(self.root / "remote"), hash_access_code("654321"), "654321"
         )
         server = LockerHTTPServer(("127.0.0.1", 0), Locker(config.locker_path), config)
@@ -93,6 +96,54 @@ class WindowTests(unittest.TestCase):
 
         self.addCleanup(stop)
         return server, stop
+
+    def connect_server(self, server, credential="654321"):
+        w = self.window
+        w.peer_combo.setEditText(f"127.0.0.1:{server.server_port}")
+        w.peer_code.setText(credential)
+        w._connect_peer()
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertIsNotNone(w._connected_client, w.locker_status.text())
+
+    def tree_items(self, tree):
+        return {
+            tree.topLevelItem(index).data(0, Qt.ItemDataRole.UserRole): tree.topLevelItem(index)
+            for index in range(tree.topLevelItemCount())
+        }
+
+    def select_paths(self, tree, paths):
+        tree.clearSelection()
+        items = self.tree_items(tree)
+        for path in paths:
+            items[path].setSelected(True)
+        self.app.processEvents()
+
+    def drop_mime_on_view(self, view, mime, item=None):
+        point = view.visualItemRect(item).center() if item is not None else QPoint(10, view.viewport().height() - 5)
+        enter = QDragEnterEvent(point, Qt.DropAction.CopyAction, mime,
+                               Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.app.sendEvent(view.viewport(), enter)
+        drop = QDropEvent(QPointF(point), Qt.DropAction.CopyAction, mime,
+                          Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.app.sendEvent(view.viewport(), drop)
+        return drop.isAccepted()
+
+    def drop_selection(self, source_tree, destination_tree, target_item=None):
+        # Capture the real widget's MIME data while skipping the blocking OS
+        # drag loop, then deliver ordinary Qt drag/drop events to the target.
+        with patch("fastfiles.locker_widgets.QDrag") as drag:
+            source_tree.startDrag(Qt.DropAction.CopyAction)
+            mime = drag.return_value.setMimeData.call_args.args[0]
+        return self.drop_mime_on_view(destination_tree, mime, target_item)
+
+    def save_computer(self, server, *, last_folder="", folders=None, device_id="remote-test"):
+        w = self.window
+        profile = PeerProfile("Home server", "127.0.0.1", server.server_port,
+                              device_id, folders or {}, last_folder)
+        w.profile_store.save_peer(profile)
+        w.secret_store.get.return_value = "654321"
+        w._update_peers([])
+        return profile
 
     def test_actions_visible_and_inputs_do_not_overlap_at_small_size(self):
         for width, height in ((1120, 840), (800, 600)):
@@ -207,6 +258,306 @@ class WindowTests(unittest.TestCase):
         self.assertIn("example.txt", w.locker_status.text())
         self.assertEqual(w.remote_tree.topLevelItemCount(), 1)
         self.assertTrue(w.peer_combo.isEnabled())
+
+    def test_external_remote_drop_copies_photos_without_local_staging(self):
+        server, _ = self.server()
+        self.connect_server(server)
+        w = self.window
+        source = self.root / "camera"
+        source.mkdir()
+        photo = source / "holiday photo.jpg"
+        photo.write_bytes(b"photo\0" * 1000)
+        album = source / "album"
+        (album / "empty").mkdir(parents=True)
+        (album / "second.png").write_bytes(b"second photo")
+        self.assertTrue(self.drop_paths(w.remote_drop, [photo, album]))
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertEqual((server.locker.root / photo.name).read_bytes(), photo.read_bytes())
+        self.assertEqual((server.locker.root / "album" / "second.png").read_bytes(), b"second photo")
+        self.assertTrue((server.locker.root / "album" / "empty").is_dir())
+        self.assertFalse((w.locker.root / photo.name).exists())
+        self.assertFalse((w.locker.root / "album").exists())
+        self.assertEqual(set(self.tree_items(w.remote_tree)), {photo.name, "album"})
+        self.assertTrue(photo.exists())
+        self.assertIn("Sent 2 file", w.locker_status.text())
+
+    def test_send_and_receive_multiple_selected_files(self):
+        server, _ = self.server()
+        w = self.window
+        for name in ("first.jpg", "second.png"):
+            (w.locker.root / name).write_bytes(name.encode())
+        w._refresh_local_locker()
+        self.connect_server(server)
+        self.select_paths(w.local_tree, ["first.jpg", "second.png"])
+        self.assertTrue(w.upload_peer.isEnabled())
+        QTest.mouseClick(w.upload_peer, Qt.MouseButton.LeftButton)
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertEqual(set(self.tree_items(w.remote_tree)), {"first.jpg", "second.png"})
+        w._go_inbox()
+        self.select_paths(w.remote_tree, ["first.jpg", "second.png"])
+        self.assertTrue(w.download_peer.isEnabled())
+        QTest.mouseClick(w.download_peer, Qt.MouseButton.LeftButton)
+        self.wait_for(lambda: not w._locker_busy)
+        for name in ("first.jpg", "second.png"):
+            self.assertEqual((w.locker.root / "Inbox" / name).read_bytes(), name.encode())
+            self.assertTrue((w.locker.root / name).exists())
+            self.assertTrue((server.locker.root / name).exists())
+        self.assertIn("Received 2 file", w.locker_status.text())
+
+    def test_drag_between_lockers_uses_the_folder_under_the_pointer(self):
+        server, _ = self.server()
+        w = self.window
+        (w.locker.root / "photo.jpg").write_bytes(b"photo")
+        (w.locker.root / "received").mkdir()
+        (server.locker.root / "album").mkdir()
+        w._refresh_local_locker()
+        self.connect_server(server)
+        self.select_paths(w.local_tree, ["photo.jpg"])
+        target = self.tree_items(w.remote_tree)["album"]
+        self.assertTrue(self.drop_selection(w.local_tree, w.remote_tree, target))
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertEqual((server.locker.root / "album" / "photo.jpg").read_bytes(), b"photo")
+        self.assertFalse((server.locker.root / "photo.jpg").exists())
+        self.select_paths(w.remote_tree, ["album"])
+        target = self.tree_items(w.local_tree)["received"]
+        self.assertTrue(self.drop_selection(w.remote_tree, w.local_tree, target))
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertEqual((w.locker.root / "received" / "album" / "photo.jpg").read_bytes(), b"photo")
+        self.assertTrue((w.locker.root / "photo.jpg").exists())
+
+    def test_poll_updates_incoming_activity_and_remote_files_preserving_selection(self):
+        server, _ = self.server()
+        w = self.window
+        (w.locker.root / "selected.txt").write_bytes(b"local")
+        (server.locker.root / "selected.txt").write_bytes(b"remote")
+        w._refresh_local_locker()
+        self.connect_server(server)
+        self.select_paths(w.local_tree, ["selected.txt"])
+        self.select_paths(w.remote_tree, ["selected.txt"])
+        local_server, _ = self.server(w.locker_config)
+        local_peer = Peer("local-test", "Local test", "127.0.0.1", local_server.server_port)
+        photo = self.root / "incoming.jpg"
+        photo.write_bytes(b"new photo")
+        PeerClient(local_peer, "123456").upload(photo, photo.name)
+        (server.locker.root / "new-remote.png").write_bytes(b"remote photo")
+        # Trigger the connected timer promptly; exercise the same polling
+        # signal and asynchronous listing used during normal idle browsing.
+        self.assertTrue(w.locker_timer.isActive())
+        w.locker_timer.timeout.emit()
+        self.wait_for(lambda: not w._refreshing)
+        self.assertIn(photo.name, self.tree_items(w.local_tree))
+        self.assertIn("new-remote.png", self.tree_items(w.remote_tree))
+        for tree in (w.local_tree, w.remote_tree):
+            self.assertEqual([item.data(0, Qt.ItemDataRole.UserRole) for item in tree.selectedItems()],
+                             ["selected.txt"])
+        self.assertIn(photo.name, w.incoming_notice.text())
+        self.assertEqual(w.activity_list.count(), 1)
+        self.assertIn(photo.name, w.activity_list.item(0).text())
+
+    def test_computer_bookmarks_and_last_folder_survive_reconnect(self):
+        server, _ = self.server()
+        (server.locker.root / "Photos").mkdir()
+        (server.locker.root / "Inbox").mkdir()
+        w = self.window
+        profile = self.save_computer(server, last_folder="Photos")
+        w.peer_combo.setCurrentIndex(w.peer_combo.findData(f"saved:{profile.name}"))
+        self.assertEqual(w.peer_code.text(), "654321")
+        w._connect_peer()
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertEqual(w.remote_relative, "Photos")
+        with patch("fastfiles.ui.QInputDialog.getText", return_value=("Family pictures", True)):
+            w._save_remote_folder()
+        w._load_remote("Inbox")
+        self.wait_for(lambda: not w._locker_busy)
+        saved = w.profile_store.peers()[0]
+        self.assertEqual(saved.folders, {"Family pictures": "Photos"})
+        self.assertEqual(saved.last_folder, "Inbox")
+        self.assertEqual(saved.device_id, "remote-test")
+        w._disconnect_peer()
+        w._connect_peer()
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertEqual(w.remote_relative, "Inbox")
+        index = w.remote_folders.findText("Family pictures")
+        self.assertGreater(index, 0)
+        w.remote_folders.activated.emit(index)
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertEqual(w.remote_relative, "Photos")
+        self.assertEqual(w.profile_store.peers()[0].last_folder, "Photos")
+
+    def test_sidebar_drop_connects_with_remembered_key_and_uses_saved_folder(self):
+        server, _ = self.server()
+        (server.locker.root / "Photos").mkdir()
+        w = self.window
+        self.save_computer(server, last_folder="Photos")
+        source = self.root / "camera.jpg"
+        source.write_bytes(b"photo")
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(source))])
+        self.assertTrue(self.drop_mime_on_view(w.computers, mime, w.computers.item(0)))
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertIsNotNone(w._connected_client, w.locker_status.text())
+        self.assertEqual(w.remote_relative, "Photos")
+        self.assertEqual((server.locker.root / "Photos" / source.name).read_bytes(), b"photo")
+        self.assertFalse((server.locker.root / source.name).exists())
+        self.assertFalse((w.locker.root / source.name).exists())
+
+    def test_sidebar_drop_missing_saved_folder_never_redirects_to_root(self):
+        server, _ = self.server()
+        w = self.window
+        self.save_computer(server, last_folder="missing")
+        source = self.root / "camera.jpg"
+        source.write_bytes(b"photo")
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(source))])
+        self.assertTrue(self.drop_mime_on_view(w.computers, mime, w.computers.item(0)))
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertIsNone(w._connected_client)
+        self.assertIn("failed", w.locker_status.text().lower())
+        self.assertFalse((server.locker.root / source.name).exists())
+        self.assertFalse((server.locker.root / "missing").exists())
+        self.assertEqual(w.profile_store.peers()[0].last_folder, "missing")
+
+    def test_sidebar_drop_to_another_alias_for_same_endpoint_uses_its_saved_folder(self):
+        server, _ = self.server()
+        for folder in ("Photos", "Documents"):
+            (server.locker.root / folder).mkdir()
+        w = self.window
+        first = self.save_computer(server, last_folder="Photos")
+        second = PeerProfile("Work files", first.address, first.port, first.device_id,
+                             {"Work": "Documents"}, "Documents")
+        w.profile_store.save_peer(second)
+        w._update_peers([])
+        w.peer_combo.setCurrentIndex(w.peer_combo.findData(f"saved:{first.name}"))
+        w._connect_peer()
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertEqual(w.remote_relative, "Photos")
+        source = self.root / "report.txt"
+        source.write_text("work")
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(source))])
+        item = next(w.computers.item(index) for index in range(w.computers.count())
+                    if w.computers.item(index).data(Qt.ItemDataRole.UserRole) == f"saved:{second.name}")
+        self.assertTrue(self.drop_mime_on_view(w.computers, mime, item))
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertEqual((server.locker.root / "Documents" / source.name).read_text(), "work")
+        self.assertFalse((server.locker.root / "Photos" / source.name).exists())
+        self.assertEqual(w.remote_relative, "Documents")
+        self.assertGreater(w.remote_folders.findText("Work"), 0)
+
+    def test_cancelled_sidebar_connect_does_not_send_on_later_reconnect(self):
+        server, _ = self.server()
+        w = self.window
+        self.save_computer(server)
+        source = self.root / "cancelled.jpg"
+        source.write_bytes(b"photo")
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(source))])
+        entered = threading.Event()
+        release = threading.Event()
+        original_info = PeerClient.info
+
+        def delayed_info(client):
+            entered.set()
+            release.wait(2)
+            return original_info(client)
+
+        with patch.object(PeerClient, "info", delayed_info):
+            try:
+                self.assertTrue(self.drop_mime_on_view(w.computers, mime, w.computers.item(0)))
+                self.assertTrue(entered.wait(2))
+                w._cancel_locker_transfer()
+            finally:
+                release.set()
+            self.wait_for(lambda: not w._locker_busy)
+        self.assertIsNone(w._pending_drop)
+        w._connect_peer()
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertIsNotNone(w._connected_client, w.locker_status.text())
+        self.assertFalse((server.locker.root / source.name).exists())
+
+    def test_upload_only_computer_can_browse_and_send_into_inbox(self):
+        entry, token = new_computer_permission("My laptop", [], ["Inbox/**"])
+        config = LockerConfig(
+            "remote-test", "Remote test", str(self.root / "remote"), hash_access_code("654321"), "654321",
+            computer_permissions=[entry], computer_access_enabled=True,
+        )
+        server, _ = self.server(config)
+        (server.locker.root / "Inbox").mkdir()
+        (server.locker.root / "Inbox" / "private.jpg").write_bytes(b"private")
+        (server.locker.root / "private.txt").write_bytes(b"private")
+        w = self.window
+        (w.locker.root / "photo.jpg").write_bytes(b"photo")
+        w._refresh_local_locker()
+        self.connect_server(server, token)
+        self.assertEqual(set(self.tree_items(w.remote_tree)), {"Inbox"})
+        self.select_paths(w.remote_tree, ["Inbox"])
+        self.assertFalse(w.download_peer.isEnabled())
+        w._remote_open(self.tree_items(w.remote_tree)["Inbox"])
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertEqual(w.remote_relative, "Inbox")
+        self.assertEqual(w.remote_tree.topLevelItemCount(), 0)
+        self.select_paths(w.local_tree, ["photo.jpg"])
+        self.assertTrue(w.upload_peer.isEnabled())
+        self.assertTrue(w.remote_drop.isEnabled())
+        self.assertFalse(w.download_peer.isEnabled())
+        QTest.mouseClick(w.upload_peer, Qt.MouseButton.LeftButton)
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertEqual((server.locker.root / "Inbox" / "photo.jpg").read_bytes(), b"photo")
+        self.assertEqual(w.remote_tree.topLevelItemCount(), 0)
+
+    def test_saved_computer_identity_change_prevents_connection(self):
+        server, _ = self.server()
+        w = self.window
+        profile = self.save_computer(server, device_id="previous-computer")
+        w.peer_combo.setCurrentIndex(w.peer_combo.findData(f"saved:{profile.name}"))
+        w._connect_peer()
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertIsNone(w._connected_client)
+        self.assertIn("different computer", w.locker_status.text())
+        self.assertEqual(w.profile_store.peers()[0].device_id, "previous-computer")
+        self.assertFalse(w.remote_drop.isEnabled())
+
+    def test_successful_connection_remembers_updated_access_only_when_checked(self):
+        server, _ = self.server()
+        server.config.access_code = "987654"
+        server.config.access_code_hash = hash_access_code("987654")
+        w = self.window
+        profile = self.save_computer(server)
+        w.peer_combo.setCurrentIndex(w.peer_combo.findData(f"saved:{profile.name}"))
+        w.remember_code.setChecked(True)
+        w.peer_code.setText("000000")
+        w._connect_peer()
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertIsNone(w._connected_client)
+        w.secret_store.set.assert_not_called()
+        for remember in (False, True):
+            with self.subTest(remember=remember):
+                w._disconnect_peer()
+                w.secret_store.set.reset_mock()
+                w.remember_code.setChecked(remember)
+                w.peer_code.setText("987654")
+                w._connect_peer()
+                self.wait_for(lambda: not w._locker_busy)
+                self.assertIsNotNone(w._connected_client, w.locker_status.text())
+                if remember:
+                    w.secret_store.set.assert_called_once_with(profile.secret_id, "987654")
+                else:
+                    w.secret_store.set.assert_not_called()
+
+    def test_poll_rejects_changed_computer_identity_without_repinning_saved_alias(self):
+        server, _ = self.server()
+        w = self.window
+        profile = self.save_computer(server)
+        w.peer_combo.setCurrentIndex(w.peer_combo.findData(f"saved:{profile.name}"))
+        w._connect_peer()
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertEqual(w.profile_store.peers()[0].device_id, "remote-test")
+        server.config.device_id = "replacement-computer"
+        w._poll_lockers()
+        self.wait_for(lambda: not w._refreshing)
+        self.assertEqual(w.profile_store.peers()[0].device_id, "remote-test")
+        self.assertIsNone(w._connected_client)
+        self.assertFalse(w.remote_drop.isEnabled())
 
     def setup_direct(self):
         w = self.window

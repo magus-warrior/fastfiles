@@ -20,12 +20,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
+from .access import authenticate_computer, can_traverse, path_permitted, validate_computer_permissions
+from .activity import ActivityStore
 from .policy import allowed, relative_path, validate_patterns
 from .storage import config_dir, read_json, write_json
 
@@ -48,6 +51,8 @@ class LockerConfig:
     port: int = DEFAULT_PORT
     read_only: bool = False
     max_upload_bytes: int = 50 * 1024**3
+    computer_permissions: list[dict] = field(default_factory=list)
+    computer_access_enabled: bool = False
 
     def __post_init__(self) -> None:
         for name in ("device_id", "device_name", "locker_path"):
@@ -78,6 +83,38 @@ class LockerConfig:
             raise ValueError("read_only must be true or false")
         if type(self.max_upload_bytes) is not int or self.max_upload_bytes < 1:
             raise ValueError("max_upload_bytes must be a positive integer")
+        validate_computer_permissions(self.computer_permissions)
+        if type(self.computer_access_enabled) is not bool:
+            raise ValueError("computer_access_enabled must be true or false")
+        if not hasattr(self, "_access_lock"):
+            self._access_lock = threading.RLock()
+
+    @property
+    def uses_computer_keys(self) -> bool:
+        return self.computer_access_enabled or bool(self.computer_permissions)
+
+    def access_snapshot(self) -> tuple[bool, list[dict]]:
+        """Freeze authorization for one request while the owner updates grants."""
+        with self._access_lock:
+            return self.uses_computer_keys, deepcopy(self.computer_permissions)
+
+    def save_computer_permissions(self, entries: list[dict], path: Path | None = None) -> None:
+        """Persist and apply grants together; failures preserve the old access.
+
+        Computer-key mode stays enabled even when the final key is revoked.
+        Requests already authorized may finish using their captured grant.
+        """
+        entries = deepcopy(entries)
+        validate_computer_permissions(entries)
+        with self._access_lock:
+            previous = self.computer_permissions, self.computer_access_enabled
+            self.computer_permissions = entries
+            self.computer_access_enabled = True
+            try:
+                self.save(path)
+            except Exception:
+                self.computer_permissions, self.computer_access_enabled = previous
+                raise
 
     @classmethod
     def load(cls, path: Path | None = None) -> "LockerConfig":
@@ -103,8 +140,9 @@ class LockerConfig:
             ) from error
 
     def save(self, path: Path | None = None) -> None:
-        self.__post_init__()
-        write_json(path or config_dir() / "config.json", asdict(self))
+        with self._access_lock:
+            self.__post_init__()
+            write_json(path or config_dir() / "config.json", asdict(self))
 
 
 def hash_access_code(code: str) -> str:
@@ -197,6 +235,7 @@ class LockerHTTPServer(ThreadingHTTPServer):
         self.config = config
         self.auth_failures: dict[str, tuple[int, float]] = {}
         self.auth_lock = threading.Lock()
+        self.activity = ActivityStore(locker.root)
 
 
 class IPv6LockerHTTPServer(LockerHTTPServer):
@@ -225,6 +264,8 @@ class LockerRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _authorized(self) -> bool:
+        self.computer_permission: dict | None = None
+        key_mode, computer_permissions = self.server.config.access_snapshot()
         address = self.client_address[0]
         now = time.monotonic()
         with self.server.auth_lock:
@@ -238,12 +279,69 @@ class LockerRequestHandler(BaseHTTPRequestHandler):
                 )
                 return False
             code = self.headers.get("X-FastFiles-Code", "")
-            if hmac.compare_digest(hash_access_code(code), self.server.config.access_code_hash):
+            if key_mode:
+                self.computer_permission = authenticate_computer(code, computer_permissions)
+                accepted = self.computer_permission is not None
+            else:
+                accepted = hmac.compare_digest(hash_access_code(code), self.server.config.access_code_hash)
+            if accepted:
                 self.server.auth_failures.pop(address, None)
                 return True
             self.server.auth_failures[address] = (attempts + 1, since)
-        self._json(HTTPStatus.UNAUTHORIZED, {"error": "Incorrect pairing code"})
+        message = "Incorrect or revoked computer key" if key_mode else "Incorrect pairing code"
+        self._json(HTTPStatus.UNAUTHORIZED, {"error": message})
         return False
+
+    def _patterns(self, operation: str) -> list[str]:
+        if operation == "upload" and self.server.config.read_only:
+            return []
+        if self.computer_permission is None:
+            return ["**"]
+        return self.computer_permission[f"{operation}_patterns"]
+
+    def _permitted(self, relative: str, operation: str) -> bool:
+        return path_permitted(relative, self._patterns(operation))
+
+    def _may_browse(self, relative: str) -> bool:
+        return can_traverse(relative, self._patterns("download") + self._patterns("upload"))
+
+    def _listing(self, relative: str) -> list[dict]:
+        result = []
+        for entry in self.server.locker.list(relative):
+            path = entry["path"]
+            downloadable = self._permitted(path, "download")
+            if not (self._may_browse(path) if entry["is_dir"] else downloadable):
+                continue
+            result.append({
+                **entry,
+                "can_download": downloadable,
+                "can_upload": self._permitted(path, "upload"),
+            })
+        return result
+
+    def _write_target(self, relative: str) -> Path:
+        relative = relative_path(relative)
+        target = self.server.locker.resolve(relative, must_exist=False)
+        if not relative or not self._permitted(relative, "upload"):
+            raise PermissionError("Uploads are not permitted in this folder")
+        # Each newly created parent must also be a permitted upload directory.
+        # An upload of Inbox/nested/photo.jpg must not create a private parent
+        # as a side effect of a narrow grant for the leaf filename.
+        for parent in reversed(target.parents):
+            if parent == self.server.locker.root or self.server.locker.root not in parent.parents:
+                continue
+            parent_relative = parent.relative_to(self.server.locker.root).as_posix()
+            self.server.locker.resolve(parent_relative, must_exist=False)
+            if not parent.exists() and not self._permitted(parent_relative, "upload"):
+                raise PermissionError("Creating this parent folder is not permitted")
+        return target
+
+    def _record_received(self, target: Path, *, files: int, size: int) -> None:
+        source = self.computer_permission["name"] if self.computer_permission else self.client_address[0]
+        try:
+            self.server.activity.record("received", source, str(target), files, size)
+        except (OSError, ValueError):
+            logger.exception("Could not record incoming activity destination=%s", target)
 
     def _route(self) -> tuple[str, dict[str, list[str]]]:
         parsed = urllib.parse.urlsplit(self.path)
@@ -273,14 +371,31 @@ class LockerRequestHandler(BaseHTTPRequestHandler):
                         "device_name": self.server.config.device_name,
                         "protocol": PROTOCOL_VERSION,
                         "locker_path": str(self.server.locker.root),
-                        "read_only": self.server.config.read_only,
+                        "read_only": not bool(self._patterns("upload")),
+                        "computer_name": self.computer_permission["name"] if self.computer_permission else "",
+                        "can_download": bool(self._patterns("download")) and bool(self.server.config.allow_patterns),
+                        "can_upload": bool(self._patterns("upload")) and bool(self.server.config.allow_patterns),
+                        "download_patterns": self._patterns("download"),
+                        "upload_patterns": self._patterns("upload"),
                     },
                 )
                 return
-            target = self.server.locker.resolve(relative)
             if route == "/v1/files":
-                self._json(200, {"path": relative, "items": self.server.locker.list(relative)})
-            elif route == "/v1/download" and target.is_file():
+                if not self._may_browse(relative):
+                    raise PermissionError("Browsing this folder is not permitted")
+                self._json(200, {
+                    "path": relative,
+                    "items": self._listing(relative),
+                    "can_download": self._permitted(relative, "download"),
+                    "can_upload": self._permitted(relative, "upload"),
+                })
+            elif route == "/v1/download":
+                if not self._permitted(relative, "download"):
+                    raise PermissionError("Downloading this file is not permitted")
+                target = self.server.locker.resolve(relative)
+                if not target.is_file():
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+                    return
                 size = target.stat().st_size
                 logger.info(
                     "download accepted client=%s path=%s bytes=%s", self.client_address[0], relative, size
@@ -329,13 +444,14 @@ class LockerRequestHandler(BaseHTTPRequestHandler):
             if remaining > self.server.config.max_upload_bytes:
                 self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "File exceeds max_upload_bytes"})
                 return
-            target = self.server.locker.resolve(relative, must_exist=False)
-            if target == self.server.locker.root:
-                raise PermissionError("Cannot replace the locker root")
+            target = self._write_target(relative)
             if route == "/v1/directory":
                 if remaining:
                     raise ValueError("Directory requests must be empty")
+                existed = target.exists()
                 target.mkdir(parents=True, exist_ok=True)
+                if not existed:
+                    self._record_received(target, files=0, size=0)
                 self._json(201, {"path": relative})
                 return
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -364,6 +480,7 @@ class LockerRequestHandler(BaseHTTPRequestHandler):
                 target.stat().st_size,
                 target,
             )
+            self._record_received(target, files=1, size=int(length))
             self._json(201, {"path": relative, "size": int(length), "sha256": digest.hexdigest()})
         except PermissionError:
             self._json(HTTPStatus.FORBIDDEN, {"error": "Path blocked by sharing policy"})
@@ -475,7 +592,19 @@ class PeerClient:
             return value
 
     def info(self) -> dict[str, Any]:
-        return self._json("/v1/info")
+        value = self._json("/v1/info")
+        for key in ("read_only", "can_download", "can_upload"):
+            if key in value and type(value[key]) is not bool:
+                raise OSError(f"Invalid peer {key} capability")
+        if "computer_name" in value and not isinstance(value["computer_name"], str):
+            raise OSError("Invalid peer computer name")
+        for key in ("download_patterns", "upload_patterns"):
+            if key in value:
+                try:
+                    validate_patterns(value[key], key)
+                except (ValueError, PermissionError) as error:
+                    raise OSError(f"Invalid peer {key}") from error
+        return value
 
     def list(self, path: str = "") -> list[dict[str, Any]]:
         path = relative_path(path)
@@ -497,6 +626,7 @@ class PeerClient:
                 or type(entry.get("is_dir")) is not bool
                 or type(entry.get("size")) is not int
                 or entry["size"] < 0
+                or any(key in entry and type(entry[key]) is not bool for key in ("can_download", "can_upload"))
             ):
                 raise OSError("Unsafe or invalid path in peer file listing")
             relative_path(entry["path"])
@@ -631,6 +761,12 @@ class LockerService:
             Locker(config.locker_path, config.allow_patterns, config.deny_patterns),
             config,
         )
+        if not config.read_only:
+            try:
+                self.server.locker.resolve("Inbox", must_exist=False).mkdir(exist_ok=True)
+            except (OSError, ValueError):
+                # Custom policies may deliberately expose no receiving folder.
+                pass
         self.port = self.server.server_address[1]
         self._thread: threading.Thread | None = None
         self._zeroconf: Any = None

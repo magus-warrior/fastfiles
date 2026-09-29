@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .core import normalize_remote_path, validate_host
 from .locker import parse_peer_address
+from .policy import relative_path
 from .storage import config_dir, read_json, write_json
 
 logger = logging.getLogger("fastfiles.profiles")
@@ -35,6 +36,9 @@ class PeerProfile:
     name: str
     address: str
     port: int
+    device_id: str = ""
+    folders: dict[str, str] = field(default_factory=dict)
+    last_folder: str = ""
 
     def __post_init__(self) -> None:
         _name(self.name)
@@ -44,6 +48,20 @@ class PeerProfile:
         parsed = parse_peer_address(f"{address}:{self.port}")
         if parsed.address != self.address:
             raise ValueError("Save only the peer hostname or IP in address")
+        if not isinstance(self.device_id, str) or any(c in self.device_id for c in "\r\n\0"):
+            raise ValueError("Invalid saved computer identity")
+        if not isinstance(self.folders, dict):
+            raise ValueError("Saved folders must map names to relative locker paths")
+        folders = {}
+        try:
+            for name, path in self.folders.items():
+                _name(name)
+                folders[name] = relative_path(path)
+            last_folder = relative_path(self.last_folder)
+        except (ValueError, PermissionError) as error:
+            raise ValueError("Saved folders require names and relative locker paths") from error
+        object.__setattr__(self, "folders", folders)
+        object.__setattr__(self, "last_folder", last_folder)
 
     @property
     def secret_id(self) -> str:

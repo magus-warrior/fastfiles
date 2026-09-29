@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 import posixpath
-import re
 import shutil
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QDir, QObject, QProcess, Qt, QTimer, QUrl, Signal
@@ -25,7 +26,9 @@ from PySide6.QtWidgets import (
     QLayout,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -41,6 +44,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .access import can_traverse, path_permitted
+from .activity import ActivityStore
 from .availability import check_peers
 from .core import (
     Direction,
@@ -62,9 +67,16 @@ from .locker import (
     TransferCancelled,
     parse_peer_address,
 )
+from .locker_widgets import ComputerList, LockerTree
 from .logging_config import log_path
+from .policy import relative_path
 from .profiles import DirectProfile, PeerProfile, ProfileStore, SecretStore
-from .transfers import copy_from_peer, copy_to_peer, import_to_locker
+from .transfers import (
+    copy_many_from_peer,
+    copy_many_to_peer,
+    import_to_locker,
+    upload_paths_to_peer,
+)
 
 logger = logging.getLogger("fastfiles.ui")
 
@@ -178,10 +190,14 @@ class LockerSignals(QObject):
     task_error = Signal(object)
     progress = Signal(object)
     availability = Signal(object)
+    snapshot = Signal(object)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, config: LockerConfig | None = None, *, start_services: bool = True) -> None:
+    def __init__(
+        self, config: LockerConfig | None = None, *, start_services: bool = True,
+        config_path: Path | None = None,
+    ) -> None:
         super().__init__()
         self.setWindowTitle("FastFiles")
         self.resize(1120, 840)
@@ -191,6 +207,7 @@ class MainWindow(QMainWindow):
         self._cancel_requested = False
         self._active_request: TransferRequest | None = None
         self._connected_client: PeerClient | None = None
+        self._connection_problem = ""
         self._remote_info: dict = {}
         self._locker_busy = False
         self._locker_cancel = threading.Event()
@@ -201,15 +218,23 @@ class MainWindow(QMainWindow):
         self._discovered: list[Peer] = []
         self._workers = ThreadPoolExecutor(max_workers=3, thread_name_prefix="fastfiles-ui")
         self._closed = False
+        self._drag_scope = uuid.uuid4().hex
+        self._refreshing = False
+        self._view_revision = 0
+        self._pending_drop = None
+        self._activity_ids: set[str] = set()
+        self._activity_loaded = False
         self._local_paths: list[str] = []
         self.profile_store = ProfileStore()
         self.secret_store = SecretStore()
         self.locker_config = config or LockerConfig.load()
+        self.config_path = config_path
         self.locker = Locker(
             self.locker_config.locker_path,
             self.locker_config.allow_patterns,
             self.locker_config.deny_patterns,
         )
+        self.activity_store = ActivityStore(self.locker.root)
         self.locker_service: LockerService | None = None
         sharing_status = "Local sharing not started"
         if start_services:
@@ -227,13 +252,16 @@ class MainWindow(QMainWindow):
                     local_address = self.locker_config.bind_address
                     local_address = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(local_address, local_address)
                     local_peer = Peer("local", "Local service", local_address, self.locker_config.port)
-                    info = PeerClient(local_peer, self.locker_config.access_code, timeout=1).info()
+                    credential = "" if self.locker_config.uses_computer_keys else self.locker_config.access_code
+                    info = PeerClient(local_peer, credential, timeout=1).info()
                     if (
                         info.get("device_id") == self.locker_config.device_id
-                        and info.get("locker_path") == str(self.locker.root)
                         and info.get("protocol") == PROTOCOL_VERSION
                     ):
-                        sharing_status = f"Shared by the background service on port {self.locker_config.port}; restart that service after config changes"
+                        if info.get("locker_path") == str(self.locker.root):
+                            sharing_status = f"Shared by the background service on port {self.locker_config.port}; restart that service after config changes"
+                        elif self.locker_config.uses_computer_keys:
+                            sharing_status = f"Background service detected on port {self.locker_config.port}; restart it to apply this folder and its sharing permissions"
                 except (OSError, ValueError):
                     pass
         self.locker_signals = LockerSignals()
@@ -243,13 +271,17 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self.sharing_status.setText(sharing_status)
         self.sharing_status.setVisible("unavailable" in sharing_status or not start_services)
+        if "unavailable" in sharing_status:
+            self.own_details.show()
         self.own_code.setToolTip(sharing_status)
+        self.own_code.setEnabled(not self.locker_config.uses_computer_keys)
         self._set_direction(Direction.SEND)
         self.locker_signals.peers.connect(self._update_peers)
         self.locker_signals.task_done.connect(self._task_done)
         self.locker_signals.task_error.connect(self._task_error)
         self.locker_signals.progress.connect(self._locker_progress_changed)
         self.locker_signals.availability.connect(self._availability_ready)
+        self.locker_signals.snapshot.connect(self._snapshot_ready)
         self.discovery = None
         if start_services:
             try:
@@ -264,6 +296,11 @@ class MainWindow(QMainWindow):
         if start_services:
             self.peer_timer.start()
             QTimer.singleShot(0, self._check_availability)
+        self.locker_timer = QTimer(self)
+        self.locker_timer.setInterval(3000)
+        self.locker_timer.timeout.connect(self._poll_lockers)
+        self.locker_timer.start()
+        self._refresh_activity()
 
     @staticmethod
     def _scroll_page(page: QWidget) -> QScrollArea:
@@ -488,132 +525,243 @@ class MainWindow(QMainWindow):
         shell = QVBoxLayout(container)
         shell.setContentsMargins(0, 0, 0, 0)
         page = QWidget()
-        shell.addWidget(self._scroll_page(page), 1)
+        self.locker_scroll = self._scroll_page(page)
+        shell.addWidget(self.locker_scroll, 1)
         footer_widget = QWidget()
         footer = QVBoxLayout(footer_widget)
-        footer.setContentsMargins(28, 8, 28, 18)
+        footer.setContentsMargins(20, 8, 20, 14)
         shell.addWidget(footer_widget)
         outer = QVBoxLayout(page)
-        outer.setContentsMargins(28, 16, 28, 12)
+        outer.setContentsMargins(20, 12, 20, 12)
         outer.setSpacing(10)
         outer.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
-        title = QLabel("Locker")
+        heading = QHBoxLayout()
+        title = QLabel("Your lockers")
         title.setObjectName("title")
-        subtitle = QLabel("Your shared folder, connected to the machines you choose.")
+        heading.addWidget(title)
+        heading.addStretch()
+        pair_toggle = QPushButton("Pair this computer")
+        pair_toggle.setCheckable(True)
+        heading.addWidget(pair_toggle)
+        self.sharing_settings = QPushButton("Sharing permissions…")
+        self.sharing_settings.clicked.connect(self._show_sharing_settings)
+        heading.addWidget(self.sharing_settings)
+        outer.addLayout(heading)
+        subtitle = QLabel("Choose a computer. Browse its shared folders. Drag files to copy them.")
+        self.locker_subtitle = subtitle
         subtitle.setObjectName("subtitle")
-        outer.addWidget(title)
+        subtitle.setWordWrap(True)
         outer.addWidget(subtitle)
-        notice = QLabel(
-            "Locker uses unencrypted HTTP. Use it on a trusted LAN or encrypted VPN; use Direct SSH across the internet."
-        )
+
+        self.own_details = QWidget()
+        details_layout = QVBoxLayout(self.own_details)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        own_row = QHBoxLayout()
+        own_row.addWidget(self._label(f"This computer: {self.locker_config.device_name}"), 1)
+        own_row.addWidget(QLabel("Pairing code"))
+        self.own_code = QLineEdit(self.locker_config.access_code)
+        self.own_code.setReadOnly(True)
+        self.own_code.setEchoMode(QLineEdit.EchoMode.Password)
+        self.own_code.setFixedWidth(90)
+        own_row.addWidget(self.own_code)
+        reveal = QPushButton("Show")
+        reveal.setCheckable(True)
+        reveal.toggled.connect(lambda shown: self.own_code.setEchoMode(
+            QLineEdit.EchoMode.Normal if shown else QLineEdit.EchoMode.Password))
+        own_row.addWidget(reveal)
+        details_layout.addLayout(own_row)
+        self.sharing_status = QLabel()
+        self.sharing_status.setWordWrap(True)
+        self.sharing_status.setObjectName("muted")
+        details_layout.addWidget(self.sharing_status)
+        notice = QLabel("Shared over your trusted LAN or VPN. Locker traffic is unencrypted.")
+        notice.setObjectName("muted")
         notice.setWordWrap(True)
-        notice.setObjectName("notice")
-        outer.addWidget(notice)
+        details_layout.addWidget(notice)
+        outer.addWidget(self.own_details)
+        self.own_details.hide()
+        pair_toggle.toggled.connect(self.own_details.setVisible)
+
+        body = QHBoxLayout()
+        body.setSpacing(12)
+        sidebar = QWidget()
+        sidebar.setMinimumWidth(145)
+        sidebar.setMaximumWidth(170)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(0, 0, 0, 0)
+        side.addWidget(self._label("Computers"))
+        self.computers = ComputerList()
+        self.computers.drag_scope = self._drag_scope
+        self.computers.setMinimumHeight(235)
+        self.computers.setWordWrap(True)
+        self.computers.setToolTip("Select a computer to browse. Drop files on it to send to its saved folder.")
+        self.computers.itemClicked.connect(self._computer_selected)
+        self.computers.transfer_dropped.connect(self._drop_on_computer)
+        side.addWidget(self.computers, 1)
+        self.check_peers = QPushButton("Check computers")
+        side.addWidget(self.check_peers)
+        self.availability_label = QLabel("Saved computers remain here when offline.")
+        self.availability_label.setObjectName("muted")
+        self.availability_label.setWordWrap(True)
+        side.addWidget(self.availability_label)
+        body.addWidget(sidebar)
+        workspace = QVBoxLayout()
+        workspace.setSpacing(8)
+        body.addLayout(workspace, 1)
 
         connection = QFrame()
         connection.setObjectName("card")
         connection_layout = QVBoxLayout(connection)
-        connection_layout.setContentsMargins(18, 14, 18, 14)
-        own_row = QHBoxLayout()
-        own_row.addWidget(self._label(f"This device: {self.locker_config.device_name}"))
-        own_row.addStretch()
-        own_row.addWidget(QLabel("My pairing code"))
-        self.own_code = QLineEdit(self.locker_config.access_code)
-        self.own_code.setReadOnly(True)
-        self.own_code.setEchoMode(QLineEdit.EchoMode.Password)
-        self.own_code.setMaximumWidth(110)
-        own_row.addWidget(self.own_code)
-        reveal = QPushButton("Show")
-        reveal.setCheckable(True)
-        reveal.toggled.connect(
-            lambda shown: self.own_code.setEchoMode(
-                QLineEdit.EchoMode.Normal if shown else QLineEdit.EchoMode.Password
-            )
-        )
-        own_row.addWidget(reveal)
-        connection_layout.addLayout(own_row)
-        self.sharing_status = QLabel()
-        self.sharing_status.setWordWrap(True)
-        self.sharing_status.setObjectName("muted")
-        connection_layout.addWidget(self.sharing_status)
+        connection_layout.setContentsMargins(12, 10, 12, 10)
         peer_row = QHBoxLayout()
         self.peer_combo = QComboBox()
         self.peer_combo.setEditable(True)
-        self.peer_combo.setMinimumWidth(230)
+        self.peer_combo.setMinimumWidth(90)
         self.peer_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.peer_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.peer_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.peer_combo.lineEdit().setPlaceholderText("Select a machine or type IP / hostname[:port]")
+        self.peer_combo.lineEdit().setPlaceholderText("Computer address or saved alias")
         self.peer_code = QLineEdit()
-        self.peer_code.setPlaceholderText("Pairing code")
-        self.peer_code.setMaxLength(6)
-        self.peer_code.setMaximumWidth(150)
+        self.peer_code.setPlaceholderText("Code or computer key")
+        self.peer_code.setMaxLength(256)
+        self.peer_code.setMinimumWidth(95)
+        self.peer_code.setMaximumWidth(175)
         self.peer_code.setEchoMode(QLineEdit.EchoMode.Password)
         self.connect_peer = QPushButton("Connect")
+        self.connection_options = QPushButton("⋯")
+        self.connection_options.setCheckable(True)
+        self.connection_options.setChecked(True)
+        self.connection_options.setFixedWidth(38)
+        self.connection_options.setToolTip("Saved computer settings")
+        self.connection_options.setAccessibleName("Saved computer settings")
         self.save_peer = QPushButton("Save as…")
-        self.delete_peer = QPushButton("Delete saved")
-        self.check_peers = QPushButton("Check now")
+        self.delete_peer = QPushButton("Forget")
         peer_row.addWidget(self.peer_combo, 1)
         peer_row.addWidget(self.peer_code)
         peer_row.addWidget(self.connect_peer)
+        peer_row.addWidget(self.connection_options)
         connection_layout.addLayout(peer_row)
-        profile_row = QHBoxLayout()
-        self.remember_code = QCheckBox("Remember code in keyring")
+        self.profile_options = QWidget()
+        profile_row = QHBoxLayout(self.profile_options)
+        profile_row.setContentsMargins(0, 0, 0, 0)
+        self.remember_code = QCheckBox("Remember access")
+        self.remember_code.setToolTip("Store this computer's code or key in the system keyring")
         profile_row.addWidget(self.remember_code)
         profile_row.addStretch()
         profile_row.addWidget(self.save_peer)
         profile_row.addWidget(self.delete_peer)
-        profile_row.addWidget(self.check_peers)
-        connection_layout.addLayout(profile_row)
-        self.availability_label = QLabel("Saved IPs and discovered machines are checked every 15 seconds.")
-        self.availability_label.setObjectName("muted")
-        self.availability_label.setWordWrap(True)
-        connection_layout.addWidget(self.availability_label)
-        outer.addWidget(connection)
+        connection_layout.addWidget(self.profile_options)
+        self.connection_options.toggled.connect(self.profile_options.setVisible)
+        workspace.addWidget(connection)
+        self.connection_summary = QLabel("Select a saved computer, or enter an address and connect.")
+        self.connection_summary.setWordWrap(True)
+        self.connection_summary.setObjectName("section")
+        workspace.addWidget(self.connection_summary)
 
         browsers = QHBoxLayout()
-        browsers.setSpacing(16)
+        browsers.setSpacing(10)
         local_card, self.local_tree, self.local_path_label, self.local_back = self._browser_card("My locker")
-        remote_card, self.remote_tree, self.remote_path_label, self.remote_back = self._browser_card(
-            "Peer locker"
-        )
+        remote_card, self.remote_tree, self.remote_path_label, self.remote_back = self._browser_card("Computer locker")
+        self.local_tree.side = "local"
+        self.remote_tree.side = "remote"
+        for tree in (self.local_tree, self.remote_tree):
+            tree.drag_scope = self._drag_scope
         self.remote_path_label.setText("Not connected")
-        browsers.addWidget(local_card)
-        browsers.addWidget(remote_card)
-        outer.addLayout(browsers, 1)
-        self.local_empty = QLabel(
-            "Your locker is empty. Drop files or folders below to add them."
-        )
-        self.remote_empty = QLabel("Select a machine and enter its pairing code to browse its locker.")
+        browsers.addWidget(local_card, 1)
+        browsers.addWidget(remote_card, 1)
+        workspace.addLayout(browsers, 1)
+        self.local_tools = QWidget()
+        local_tools = QHBoxLayout(self.local_tools)
+        local_tools.setContentsMargins(0, 0, 0, 0)
+        self.local_home = QPushButton("Home")
+        self.local_inbox = QPushButton("Inbox")
+        self.local_new_folder = QPushButton("New")
+        self.local_new_folder.setToolTip("Create a folder in My locker")
+        for button in (self.local_home, self.local_inbox, self.local_new_folder):
+            local_tools.addWidget(button)
+        local_card.layout().insertWidget(2, self.local_tools)
+        self.remote_tools = QWidget()
+        remote_tools = QHBoxLayout(self.remote_tools)
+        remote_tools.setContentsMargins(0, 0, 0, 0)
+        self.remote_home = QPushButton("Home")
+        self.remote_new_folder = QPushButton("New")
+        self.remote_new_folder.setToolTip("Create a folder on this computer")
+        remote_tools.addWidget(self.remote_home)
+        remote_tools.addWidget(self.remote_new_folder)
+        remote_card.layout().insertWidget(2, self.remote_tools)
+        self.remote_folders = QComboBox()
+        self.remote_folders.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.remote_folders.setMinimumContentsLength(5)
+        self.remote_folders.setToolTip("Folders saved for this computer")
+        self.remote_folders.activated.connect(self._open_saved_folder)
+        self.save_folder = QPushButton("Save folder…")
+        self.save_folder.clicked.connect(self._save_remote_folder)
+        folders_row = QHBoxLayout()
+        folders_row.addWidget(self.remote_folders, 1)
+        folders_row.addWidget(self.save_folder)
+        workspace.insertLayout(2, folders_row)
+        self.local_empty = QLabel("Drop photos, files or folders here to share them.")
+        self.remote_empty = QLabel("Connect to see this computer's shared files.")
         for label, card in ((self.local_empty, local_card), (self.remote_empty, remote_card)):
             label.setObjectName("muted")
             label.setWordWrap(True)
             card.layout().addWidget(label)
-
-        self.locker_drop = FileDropArea("Drop files and folders here to copy into My locker")
+        self.locker_drop = FileDropArea("Drop here to add to My locker")
+        self.locker_drop.setMinimumHeight(36)
         self.locker_drop.paths_dropped.connect(self._drop_locker_paths)
         local_card.layout().addWidget(self.locker_drop)
+        self.remote_drop = FileDropArea("Drop here to send to this computer")
+        self.remote_drop.setMinimumHeight(36)
+        self.remote_drop.paths_dropped.connect(lambda paths: self._drop_external_remote(paths, self.remote_relative))
+        remote_card.layout().addWidget(self.remote_drop)
+        self.local_tree.paths_dropped.connect(self._drop_external_local)
+        self.remote_tree.paths_dropped.connect(self._drop_external_remote)
+        self.local_tree.items_dropped.connect(self._drop_items_local)
+        self.remote_tree.items_dropped.connect(self._drop_items_remote)
+        for tree in (self.local_tree, self.remote_tree):
+            tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            tree.customContextMenuRequested.connect(lambda point, view=tree: self._tree_menu(view, point))
+        outer.addLayout(body, 1)
 
+        history_toggle = QPushButton("Transfer history")
+        history_toggle.setCheckable(True)
+        self.activity_list = QListWidget()
+        self.activity_list.setMaximumHeight(160)
+        self.activity_list.setWordWrap(True)
+        self.activity_list.hide()
+        self.activity_list.itemDoubleClicked.connect(self._open_activity)
+        history_toggle.toggled.connect(self._toggle_history)
+        outer.addWidget(self.activity_list)
+        self.incoming_notice = QLabel("Files received here appear automatically. Originals stay on the sending computer.")
+        self.incoming_notice.setWordWrap(True)
+        self.incoming_notice.setObjectName("muted")
+        self.incoming_notice.hide()
+        footer.addWidget(self.incoming_notice)
+        self.copy_destination = QLabel()
+        self.copy_destination.setWordWrap(True)
+        self.copy_destination.setObjectName("section")
+        footer.addWidget(self.copy_destination)
         actions = QHBoxLayout()
-        self.download_peer = QPushButton("← Receive")
-        self.upload_peer = QPushButton("Send →")
+        self.download_peer = QPushButton("← Receive selected")
+        self.upload_peer = QPushButton("Send selected →")
         self.download_peer.setEnabled(False)
         self.upload_peer.setEnabled(False)
-        self.open_locker = QPushButton("Open my locker")
+        self.open_locker = QPushButton("Open folder")
         self.refresh_lockers = QPushButton("Refresh")
         self.cancel_locker = QPushButton("Cancel")
-        actions.addWidget(self.open_locker)
-        actions.addWidget(self.refresh_lockers)
+        for button in (self.open_locker, self.refresh_lockers, self.cancel_locker):
+            actions.addWidget(button)
         actions.addStretch()
-        actions.addWidget(self.cancel_locker)
         actions.addWidget(self.download_peer)
         actions.addWidget(self.upload_peer)
         footer.addLayout(actions)
         self.replace_files = QCheckBox("Replace existing files")
-        self.replace_files.setToolTip(
-            "Off by default. Completed files are kept if a later file fails or you cancel."
-        )
-        footer.addWidget(self.replace_files)
+        self.replace_files.setToolTip("Off by default. Copying keeps originals; completed files remain if cancelled.")
+        options_row = QHBoxLayout()
+        options_row.addWidget(self.replace_files)
+        options_row.addStretch()
+        options_row.addWidget(history_toggle)
+        footer.addLayout(options_row)
         self.locker_status = QLabel("Ready to connect")
         self.locker_status.setObjectName("muted")
         self.locker_status.setWordWrap(True)
@@ -621,10 +769,11 @@ class MainWindow(QMainWindow):
         self.locker_progress = QProgressBar()
         self.locker_progress.setRange(0, 100)
         self.locker_progress.setValue(0)
+        self.locker_progress.setMaximumHeight(8)
         footer.addWidget(self.locker_progress)
         footer.addWidget(self.locker_status)
-
         self.connect_peer.clicked.connect(self._connect_peer)
+        self.peer_code.returnPressed.connect(self._connect_peer)
         self.save_peer.clicked.connect(self._save_peer_profile)
         self.delete_peer.clicked.connect(self._delete_peer_profile)
         self.check_peers.clicked.connect(self._check_availability)
@@ -632,6 +781,11 @@ class MainWindow(QMainWindow):
         self.peer_code.textEdited.connect(self._disconnect_peer)
         self.local_back.clicked.connect(self._local_back)
         self.remote_back.clicked.connect(self._remote_back)
+        self.local_home.clicked.connect(lambda: self._go_local(""))
+        self.local_inbox.clicked.connect(self._go_inbox)
+        self.local_new_folder.clicked.connect(lambda: self._new_folder(False))
+        self.remote_home.clicked.connect(lambda: self._load_remote(""))
+        self.remote_new_folder.clicked.connect(lambda: self._new_folder(True))
         self.local_tree.itemDoubleClicked.connect(self._local_open)
         self.remote_tree.itemDoubleClicked.connect(self._remote_open)
         self.upload_peer.clicked.connect(self._upload_selected)
@@ -640,10 +794,314 @@ class MainWindow(QMainWindow):
         self.cancel_locker.clicked.connect(self._cancel_locker_transfer)
         self.local_tree.itemSelectionChanged.connect(self._update_locker_controls)
         self.remote_tree.itemSelectionChanged.connect(self._update_locker_controls)
-        self.open_locker.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.locker.root)))
-        )
+        self.open_locker.clicked.connect(lambda: QDesktopServices.openUrl(
+            QUrl.fromLocalFile(str(self.locker.root / self.local_relative))))
         return container
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if not hasattr(self, "remote_drop"):
+            return
+        compact = self.height() < 720
+        self.locker_subtitle.setVisible(not compact)
+        self.local_tools.setVisible(not compact)
+        self.remote_tools.setVisible(not compact)
+        self.locker_drop.setVisible(not compact)
+        self.remote_drop.setVisible(not compact)
+        for tree in (self.local_tree, self.remote_tree):
+            tree.setMinimumHeight(120 if compact else 180)
+        if compact != getattr(self, "_compact", None):
+            self.connection_options.setChecked(not compact)
+            self._compact = compact
+
+    def _tree_menu(self, tree: LockerTree, point) -> None:
+        remote = tree is self.remote_tree
+        menu = QMenu(tree)
+        buttons = (
+            (self.download_peer, self.remote_home, self.remote_new_folder, self.save_folder)
+            if remote else (self.upload_peer, self.local_home, self.local_inbox, self.local_new_folder)
+        )
+        for button in buttons:
+            action = menu.addAction(button.text())
+            action.setEnabled(button.isEnabled())
+            action.triggered.connect(button.click)
+        menu.exec(tree.viewport().mapToGlobal(point))
+
+    def _toggle_history(self, shown: bool) -> None:
+        self.activity_list.setVisible(shown)
+        if shown:
+            QTimer.singleShot(0, lambda: self.locker_scroll.ensureWidgetVisible(self.activity_list))
+
+    @staticmethod
+    def _valid_credential(value: str) -> bool:
+        return bool(value) and len(value) <= 256 and value.isascii() and all(33 <= ord(c) <= 126 for c in value)
+
+    def _saved_profile(self) -> PeerProfile | None:
+        peer = self._selected_peer()
+        key = peer.device_id if peer else ""
+        if not key.startswith("saved:"):
+            return None
+        return next((p for p in self.profile_store.peers() if p.name == key.removeprefix("saved:")), None)
+
+    def _computer_selected(self, item: QListWidgetItem) -> None:
+        if self._locker_busy:
+            return
+        key = item.data(Qt.ItemDataRole.UserRole)
+        index = self.peer_combo.findData(key)
+        if index >= 0:
+            self.peer_combo.setCurrentIndex(index)
+            if self._connected_client is None and self.peer_code.text().strip():
+                self._connect_peer()
+            elif self._connected_client is None:
+                self.peer_code.setFocus()
+
+    def _drop_on_computer(self, key: str, payload: dict) -> None:
+        if self._locker_busy:
+            return
+        index = self.peer_combo.findData(key)
+        if index < 0:
+            return
+        self.peer_combo.setCurrentIndex(index)
+        if self._connected_client:
+            self._perform_pending_drop(payload)
+        else:
+            self._pending_drop = (key, payload)
+            if self.peer_code.text().strip():
+                self._connect_peer()
+            else:
+                self.locker_status.setText("Enter this computer's code or key and Connect to send the dropped items.")
+                self.peer_code.setFocus()
+
+    def _perform_pending_drop(self, payload: dict) -> None:
+        if "paths" in payload:
+            self._drop_external_remote(payload["paths"], self.remote_relative)
+        elif payload.get("side") == "local":
+            self._drop_items_remote("local", payload["items"], self.remote_relative, payload.get("connection_id", ""))
+
+    def _refresh_saved_folders(self) -> None:
+        self.remote_folders.blockSignals(True)
+        self.remote_folders.clear()
+        self.remote_folders.addItem("Saved folders", None)
+        try:
+            profile = self._saved_profile()
+            if profile:
+                for name, path in profile.folders.items():
+                    self.remote_folders.addItem(name, path)
+        except (OSError, ValueError) as error:
+            self.locker_status.setText(str(error))
+        self.remote_folders.blockSignals(False)
+
+    def _remember_remote_folder(self) -> None:
+        try:
+            profile = self._saved_profile()
+            if profile and self._connected_client:
+                device_id = self._remote_info.get("device_id", "")
+                if profile.last_folder != self.remote_relative or profile.device_id != device_id:
+                    self.profile_store.save_peer(replace(profile, last_folder=self.remote_relative, device_id=device_id))
+        except (OSError, ValueError) as error:
+            self.locker_status.setText(f"Could not remember this folder: {error}")
+
+    def _save_remote_folder(self) -> None:
+        try:
+            profile = self._saved_profile()
+            if profile is None:
+                self._save_peer_profile()
+                profile = self._saved_profile()
+            if profile is None or self._connected_client is None:
+                return
+            name, accepted = QInputDialog.getText(
+                self, "Save folder", "Folder alias", text=posixpath.basename(self.remote_relative) or "Home")
+            if not accepted or not name.strip():
+                return
+            folders = dict(profile.folders)
+            folders[name.strip()] = self.remote_relative
+            self.profile_store.save_peer(replace(profile, folders=folders, last_folder=self.remote_relative))
+            self._refresh_saved_folders()
+        except (OSError, ValueError) as error:
+            self._locker_error(str(error))
+
+    def _open_saved_folder(self, index: int) -> None:
+        path = self.remote_folders.itemData(index)
+        if path is not None and self._connected_client:
+            self._load_remote(path)
+
+    def _go_local(self, relative: str) -> None:
+        if self._locker_busy:
+            return
+        self._view_revision += 1
+        self.local_relative = relative
+        self._refresh_local_locker()
+
+    def _go_inbox(self) -> None:
+        try:
+            target = self.locker.resolve("Inbox", must_exist=False)
+            if not target.exists():
+                if self.locker_config.read_only:
+                    raise PermissionError("This locker is read-only")
+                target.mkdir()
+            self._go_local("Inbox")
+        except (OSError, ValueError) as error:
+            self._locker_error(str(error))
+
+    def _new_folder(self, remote: bool) -> None:
+        name, accepted = QInputDialog.getText(self, "New folder", "Folder name")
+        if not accepted or not name.strip():
+            return
+        try:
+            name = name.strip()
+            if relative_path(name) != name or "/" in name:
+                raise ValueError("Enter a single folder name")
+            directory = self.remote_relative if remote else self.local_relative
+            target = posixpath.join(directory, name)
+            if remote:
+                client = self._client()
+                self._run_locker_task("new_folder", lambda: client.mkdir(target))
+            else:
+                if self.locker_config.read_only:
+                    raise PermissionError("This locker is read-only")
+                self.locker.resolve(target, must_exist=False).mkdir()
+                self._refresh_local_locker()
+        except (OSError, ValueError) as error:
+            self._locker_error(str(error))
+
+    def _remote_writable(self, directory: str) -> bool:
+        if self._connection_problem or not self._connected_client or self._remote_info.get("read_only", False):
+            return False
+        if not self._remote_info.get("can_upload", True):
+            return False
+        patterns = self._remote_info.get("upload_patterns", ["**"])
+        return can_traverse(directory, patterns)
+
+    def _upload_targets_allowed(self, names: list[str], directory: str) -> bool:
+        if not self._remote_writable(directory):
+            return False
+        patterns = self._remote_info.get("upload_patterns", ["**"])
+        return all(path_permitted(posixpath.join(directory, name), patterns) for name in names)
+
+    def _drop_external_local(self, paths: list[str], directory: str) -> None:
+        if self._locker_busy or self.locker_config.read_only:
+            return
+        self._import_paths(paths, directory)
+
+    def _drop_external_remote(self, paths: list[str], directory: str) -> None:
+        if self._locker_busy:
+            return
+        try:
+            client = self._client()
+            if not self._upload_targets_allowed([Path(path).name for path in paths], directory):
+                raise PermissionError("Uploading these items is not permitted here. Choose a folder that allows uploads.")
+            overwrite = self.replace_files.isChecked()
+            self._copy_names = ", ".join(Path(path).name for path in paths[:3])
+            self.locker_status.setText(f"Sending {len(paths)} item(s) to {client.peer.name}/{directory or ''}…")
+            self._run_locker_task("send", lambda: upload_paths_to_peer(
+                client, paths, directory, self._transfer_progress, self._locker_cancel, overwrite=overwrite))
+        except (OSError, ValueError) as error:
+            self._locker_error(str(error))
+
+    def _drop_items_local(self, side: str, items: list[dict], directory: str, connection_id: str) -> None:
+        if side != "remote" or self._locker_busy or self.locker_config.read_only:
+            return
+        if not self._connected_client or connection_id != self._endpoint(self._connected_client.peer):
+            self._locker_error("The source computer changed. Select the files again.")
+            return
+        self._receive_items([(item["path"], item["is_dir"]) for item in items], directory)
+
+    def _drop_items_remote(self, side: str, items: list[dict], directory: str, connection_id: str) -> None:
+        if side != "local" or self._locker_busy:
+            return
+        self._send_items([item["path"] for item in items], directory)
+
+    def _show_sharing_settings(self) -> None:
+        from .sharing_dialog import SharingDialog
+
+        dialog = SharingDialog(self.locker_config, self.config_path, self)
+        dialog.exec()
+        self.own_code.setEnabled(not self.locker_config.uses_computer_keys)
+        self.own_code.setToolTip("Computer-specific keys are required" if self.locker_config.uses_computer_keys else "Pairing code")
+        self._update_locker_controls()
+        if dialog.changed:
+            if self.locker_service:
+                self.sharing_status.setText("Sharing permissions updated for new requests.")
+            else:
+                self.sharing_status.setText("Sharing permissions saved. Restart the background service to apply them.")
+            self.sharing_status.show()
+            self.own_details.show()
+
+    def _refresh_activity(self) -> None:
+        try:
+            entries = self.activity_store.recent()
+        except (OSError, ValueError) as error:
+            self.incoming_notice.setText(f"Could not read transfer history: {error}")
+            self.incoming_notice.show()
+            return
+        ids = {entry["id"] for entry in entries}
+        if ids == self._activity_ids and self._activity_loaded:
+            return
+        new = [entry for entry in entries if entry["id"] not in self._activity_ids and entry["kind"] == "received"]
+        if new and self._activity_loaded:
+            entry = new[0]
+            self.incoming_notice.setText(f"Received {Path(entry['destination']).name} from {entry['source']} · See Transfer history")
+            self.incoming_notice.setToolTip(entry["destination"])
+            self.incoming_notice.show()
+        self._activity_ids = ids
+        self._activity_loaded = True
+        self.activity_list.clear()
+        for entry in entries:
+            label = f"{entry['kind'].capitalize()} · {entry['files']} file(s) · {self._human_size(entry['bytes'])} · {entry['destination']}"
+            item = QListWidgetItem(label)
+            item.setToolTip(f"{entry['time']} · {entry['source']}")
+            item.setData(Qt.ItemDataRole.UserRole, entry["destination"])
+            self.activity_list.addItem(item)
+
+    def _open_activity(self, item: QListWidgetItem) -> None:
+        destination = item.data(Qt.ItemDataRole.UserRole)
+        path = Path(destination)
+        if path.is_absolute() and path.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path if path.is_dir() else path.parent)))
+
+    def _poll_lockers(self) -> None:
+        if self._closed or self._locker_busy or self._refreshing:
+            return
+        self._refresh_local_locker(quiet=True)
+        self._refresh_activity()
+        client = self._connected_client
+        if client is None:
+            return
+        self._refreshing = True
+        revision, directory = self._view_revision, self.remote_relative
+
+        def task():
+            try:
+                result = (client.info(), client.list(directory))
+                error = ""
+            except (OSError, ValueError) as exc:
+                result, error = None, str(exc)
+            if not self._closed:
+                self.locker_signals.snapshot.emit((client, directory, revision, result, error))
+        self._workers.submit(task)
+
+    def _snapshot_ready(self, value) -> None:
+        self._refreshing = False
+        client, directory, revision, result, error = value
+        if (self._closed or self._locker_busy or client is not self._connected_client
+                or directory != self.remote_relative or revision != self._view_revision):
+            return
+        if error:
+            self._connection_problem = error
+            self.connection_summary.setText(f"Connection needs attention: {error}")
+            self._fill_tree(self.remote_tree, [])
+            self.remote_empty.setText("This computer is unavailable or access has changed. Retrying automatically…")
+            self.remote_empty.show()
+            self._update_locker_controls()
+            return
+        info, _items = result
+        if info.get("device_id") != self._remote_info.get("device_id") or info.get("protocol") != PROTOCOL_VERSION:
+            self._disconnect_peer()
+            self.connection_summary.setText("The computer identity or version changed. Connect again to verify it.")
+            return
+        self._connection_problem = ""
+        self._remote_info, items = result
+        self._show_remote_items((directory, items))
 
     def _refresh_direct_profiles(self, selected: str = "") -> None:
         self.direct_profile.blockSignals(True)
@@ -714,14 +1172,19 @@ class MainWindow(QMainWindow):
             return
         code = self.peer_code.text().strip()
         try:
+            existing_profile = next((item for item in self.profile_store.peers() if item.name == name.strip()), None)
             profile = PeerProfile(name.strip(), peer.address, peer.port)
-            existing = any(item.name == profile.name for item in self.profile_store.peers())
+            if existing_profile and (existing_profile.address, existing_profile.port) == (peer.address, peer.port):
+                profile = replace(existing_profile, name=name.strip())
+            if self._connected_client:
+                profile = replace(profile, device_id=self._remote_info.get("device_id", ""), last_folder=self.remote_relative)
+            existing = existing_profile is not None
             if existing and not self._confirm(
                 "Replace saved machine", f"Replace the saved address for {profile.name}?"
             ):
                 return
-            if self.remember_code.isChecked() and not re.fullmatch(r"[0-9]{6}", code):
-                raise ValueError("Enter a six-digit pairing code to remember it, or uncheck Remember code")
+            if self.remember_code.isChecked() and not self._valid_credential(code):
+                raise ValueError("Enter a pairing code or computer key to remember it")
             self.profile_store.save_peer(profile)
         except (OSError, ValueError) as error:
             self._locker_error(str(error))
@@ -738,7 +1201,14 @@ class MainWindow(QMainWindow):
         else:
             self.secret_store.delete(profile.secret_id)
         self._update_peers(self._discovered)
+        self.peer_combo.blockSignals(True)
         self.peer_combo.setCurrentIndex(self.peer_combo.findData(f"saved:{profile.name}"))
+        self.peer_combo.blockSignals(False)
+        self._selection_identity = (peer.address, peer.port, f"saved:{profile.name}")
+        if self._connected_client:
+            self._connected_client.peer = Peer(f"saved:{profile.name}", profile.name, peer.address, peer.port)
+            self._show_remote_items((self.remote_relative, self.remote_tree._last_items or []))
+        self._refresh_saved_folders()
         self._check_availability()
 
     def _delete_peer_profile(self) -> None:
@@ -777,8 +1247,9 @@ class MainWindow(QMainWindow):
         path.setObjectName("muted")
         path.setWordWrap(True)
         path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        tree = QTreeWidget()
+        tree = LockerTree()
         tree.setHeaderLabels(["Name", "Size"])
+        tree.setMinimumWidth(170)
         tree.setRootIsDecorated(False)
         tree.setMinimumHeight(180)
         tree.setUniformRowHeights(True)
@@ -800,25 +1271,61 @@ class MainWindow(QMainWindow):
         return ""
 
     def _fill_tree(self, tree: QTreeWidget, items: list[dict]) -> None:
+        if getattr(tree, "_last_items", None) == items:
+            return
+        tree._last_items = items
+        selected = {item.data(0, Qt.ItemDataRole.UserRole) for item in tree.selectedItems()}
+        scroll = tree.verticalScrollBar().value()
+        tree.blockSignals(True)
         tree.clear()
         for entry in items:
             size = "Folder" if entry["is_dir"] else self._human_size(entry["size"])
             item = QTreeWidgetItem([entry["name"], size])
             item.setData(0, Qt.ItemDataRole.UserRole, entry["path"])
             item.setData(0, Qt.ItemDataRole.UserRole + 1, entry["is_dir"])
+            item.setData(0, Qt.ItemDataRole.UserRole + 2, entry)
+            if entry.get("can_download") is False:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
             icon = QStyle.StandardPixmap.SP_DirIcon if entry["is_dir"] else QStyle.StandardPixmap.SP_FileIcon
             item.setIcon(0, self.style().standardIcon(icon))
-            item.setToolTip(0, entry["name"])
+            access = ""
+            if "can_download" in entry:
+                access = " · " + ", ".join(
+                    label for key, label in (("can_download", "Download"), ("can_upload", "Upload"))
+                    if entry.get(key)
+                )
+            item.setToolTip(0, entry["name"] + access)
             tree.addTopLevelItem(item)
+            item.setSelected(entry["path"] in selected)
+        tree.verticalScrollBar().setValue(scroll)
+        tree.blockSignals(False)
 
-    def _refresh_local_locker(self) -> None:
+    def _refresh_local_locker(self, *, quiet: bool = False) -> None:
         try:
             self._fill_tree(self.local_tree, self.locker.list(self.local_relative))
-            self.local_path_label.setText(str(self.locker.root / self.local_relative))
+            self.local_tree.directory = self.local_relative
+            self.local_tree.connection_id = str(self.locker.root)
+            self.local_path_label.setText("My locker / " + self.local_relative)
+            self.local_path_label.setToolTip(str(self.locker.root / self.local_relative))
             self.local_empty.setVisible(self.local_tree.topLevelItemCount() == 0)
             self._update_locker_controls()
+        except (FileNotFoundError, NotADirectoryError):
+            if self.local_relative:
+                self.local_relative = ""
+                self._view_revision += 1
+                self._refresh_local_locker(quiet=quiet)
+                self.incoming_notice.setText("The folder was removed. Showing My locker Home.")
+                self.incoming_notice.show()
+            else:
+                self._fill_tree(self.local_tree, [])
+                self.incoming_notice.setText("My locker folder is unavailable. Restore it or restart FastFiles.")
+                self.incoming_notice.show()
         except (OSError, ValueError) as error:
-            self._locker_error(str(error))
+            if quiet:
+                self.incoming_notice.setText(f"Could not refresh My locker: {error}")
+                self.incoming_notice.show()
+            else:
+                self._locker_error(str(error))
 
     def _update_peers(self, peers: list[Peer]) -> None:
         self._discovered = peers
@@ -861,6 +1368,17 @@ class MainWindow(QMainWindow):
                 current_text = self._endpoint(previous)
             self.peer_combo.setEditText(current_text)
         self.peer_combo.blockSignals(False)
+        self.computers.blockSignals(True)
+        self.computers.clear()
+        for peer in combined:
+            status = self._peer_status.get((peer.address, peer.port), "Checking")
+            item = QListWidgetItem(f"{peer.name}\n{status}")
+            item.setData(Qt.ItemDataRole.UserRole, peer.device_id)
+            item.setToolTip(f"{self._endpoint(peer)} · Drop files to send")
+            self.computers.addItem(item)
+            if peer.device_id == current_id:
+                self.computers.setCurrentItem(item)
+        self.computers.blockSignals(False)
         self._peer_changed()
         self._update_locker_controls()
 
@@ -873,13 +1391,18 @@ class MainWindow(QMainWindow):
         if self._locker_busy:
             return
         self._connected_client = None
+        self._connection_problem = ""
+        self._view_revision += 1
         self._remote_info = {}
         self.remote_relative = ""
         self.remote_tree.clear()
+        self.remote_tree._last_items = None
+        self.remote_tree.connection_id = ""
         self.remote_path_label.setText("Not connected")
         self.remote_empty.setText("Connect to a machine to see its files.")
         self.remote_empty.show()
-        self.locker_status.setText("Enter this machine’s pairing code, then Connect.")
+        self.locker_status.setText("Enter this computer’s pairing code or access key, then Connect.")
+        self.connection_summary.setText("Not connected")
         self._update_locker_controls()
 
     def _peer_changed(self, *_args) -> None:
@@ -890,9 +1413,11 @@ class MainWindow(QMainWindow):
         except ValueError:
             peer = None
         endpoint = (peer.address, peer.port) if peer else None
-        if endpoint == getattr(self, "_selection_endpoint", None):
+        identity = (*endpoint, peer.device_id) if peer else None
+        if identity == getattr(self, "_selection_identity", None):
             return
-        self._selection_endpoint = endpoint
+        self._selection_identity = identity
+        self._pending_drop = None
         self._disconnect_peer()
         self.peer_code.clear()
         self.remember_code.setChecked(False)
@@ -901,6 +1426,7 @@ class MainWindow(QMainWindow):
             if remembered:
                 self.peer_code.setText(remembered)
                 self.remember_code.setChecked(True)
+        self._refresh_saved_folders()
         self._update_locker_controls()
 
     def _selected_peer(self) -> Peer | None:
@@ -909,11 +1435,16 @@ class MainWindow(QMainWindow):
         if peer and self.peer_combo.currentText() == selected_text:
             return peer
         text = self.peer_combo.currentText().strip()
+        alias = next((peer for peer in self.peers.values() if peer.name.casefold() == text.casefold()), None)
+        if alias:
+            return alias
         return parse_peer_address(text) if text else None
 
     def _client(self) -> PeerClient:
         if self._connected_client is None:
             raise ValueError("Connect to the machine before transferring files")
+        if self._connection_problem:
+            raise ValueError("This computer is unavailable or access changed. Wait for it to reconnect or click Connect.")
         return self._connected_client
 
     def _check_availability(self) -> None:
@@ -954,40 +1485,60 @@ class MainWindow(QMainWindow):
             return
         idle = not self._locker_busy
         connected = self._connected_client is not None
+        writable = self._remote_writable(self.remote_relative)
         for widget in (
-            self.peer_combo,
-            self.peer_code,
-            self.remember_code,
-            self.connect_peer,
-            self.save_peer,
-            self.replace_files,
+            self.peer_combo, self.peer_code, self.remember_code, self.connect_peer,
+            self.save_peer, self.replace_files, self.computers, self.sharing_settings,
         ):
             widget.setEnabled(idle)
+        self.computers.drop_enabled = idle
         self.delete_peer.setEnabled(idle and str(self.peer_combo.currentData()).startswith("saved:"))
         self.locker_drop.setEnabled(idle and not self.locker_config.read_only)
+        self.remote_drop.setEnabled(idle and writable)
         self.local_tree.setEnabled(idle)
+        self.local_tree.drop_enabled = idle and not self.locker_config.read_only
         self.remote_tree.setEnabled(idle and connected)
+        self.remote_tree.drop_enabled = idle and writable
         self.local_back.setEnabled(idle and bool(self.local_relative))
+        self.local_home.setEnabled(idle and bool(self.local_relative))
+        self.local_inbox.setEnabled(idle)
+        self.local_new_folder.setEnabled(idle and not self.locker_config.read_only)
         self.remote_back.setEnabled(idle and connected and bool(self.remote_relative))
+        self.remote_home.setEnabled(idle and connected)
+        self.remote_new_folder.setEnabled(idle and writable)
+        self.remote_folders.setEnabled(idle and connected)
+        self.save_folder.setEnabled(idle and connected)
+        self.remote_folders.setVisible(connected)
+        self.save_folder.setVisible(connected)
         self.refresh_lockers.setEnabled(idle)
         self.cancel_locker.setEnabled(self._locker_busy and not self._locker_cancel.is_set())
-        self.upload_peer.setEnabled(
-            idle
-            and connected
-            and not self._remote_info.get("read_only", False)
-            and bool(self.local_tree.selectedItems())
+        upload_names = [posixpath.basename(item.data(0, Qt.ItemDataRole.UserRole)) for item in self.local_tree.selectedItems()]
+        self.upload_peer.setEnabled(idle and bool(upload_names) and self._upload_targets_allowed(upload_names, self.remote_relative))
+        downloadable = bool(self.remote_tree.selectedItems()) and all(
+            (item.data(0, Qt.ItemDataRole.UserRole + 2) or {}).get("can_download", True)
+            for item in self.remote_tree.selectedItems()
         )
         self.download_peer.setEnabled(
-            idle and connected and not self.locker_config.read_only and bool(self.remote_tree.selectedItems())
+            idle and connected and not self._connection_problem and not self.locker_config.read_only and downloadable)
+        self.copy_destination.setText(
+            f"Receive into My locker/{self.local_relative} · Send into "
+            f"{self._connected_client.peer.name}/{self.remote_relative}" if connected else
+            f"Add files to My locker/{self.local_relative} to make them available to permitted computers."
         )
+        self.locker_drop.setToolTip(str(self.locker.root / self.local_relative))
+        if connected:
+            self.remote_drop.setToolTip(f"Copy to {self._connected_client.peer.name}/{self.remote_relative}")
 
     def _run_locker_task(self, kind: str, task) -> None:
         if self._locker_busy:
             return
         self._locker_busy = True
+        self._view_revision += 1
         self._locker_cancel.clear()
         self._task_id += 1
         task_id = self._task_id
+        if kind in ("send", "receive", "import"):
+            self.locker_progress.setValue(0)
         self._update_locker_controls()
 
         def run() -> None:
@@ -1010,16 +1561,19 @@ class MainWindow(QMainWindow):
             if not peer:
                 raise ValueError("Choose a machine or enter its IP / hostname")
             code = self.peer_code.text().strip()
-            if not re.fullmatch(r"[0-9]{6}", code):
-                raise ValueError("Enter the machine’s six-digit pairing code")
+            if not self._valid_credential(code):
+                raise ValueError("Enter the computer’s pairing code or access key")
             client = PeerClient(peer, code)
-        except ValueError as error:
+            profile = self._saved_profile()
+            pending_drop = self._pending_drop
+        except (OSError, ValueError) as error:
             self._locker_error(str(error))
             return
         self.locker_status.setText(f"Connecting to {client.peer.name}…")
         logger.info("peer connection starting name=%s endpoint=%s", client.peer.name, client.peer.base_url)
         self._connected_client = None
         self.remote_tree.clear()
+        self.remote_tree._last_items = None
 
         def task() -> None:
             info = client.info()
@@ -1029,8 +1583,18 @@ class MainWindow(QMainWindow):
                 raise OSError("This address points to this machine’s own locker")
             if not isinstance(info.get("locker_path"), str) or type(info.get("read_only")) is not bool:
                 raise OSError("Invalid peer connection response")
-            items = client.list("")
-            return client, info, items
+            if profile and profile.device_id and info.get("device_id") != profile.device_id:
+                raise OSError("This address belongs to a different computer. Forget the saved connection and pair again.")
+            directory = profile.last_folder if profile else ""
+            fallback = False
+            try:
+                items = client.list(directory)
+            except OSError:
+                if not directory or pending_drop:
+                    raise
+                directory, fallback = "", True
+                items = client.list(directory)
+            return client, info, directory, items, fallback
 
         self._run_locker_task("connect", task)
 
@@ -1046,25 +1610,42 @@ class MainWindow(QMainWindow):
     def _show_remote_items(self, result: tuple[str, list[dict]]) -> None:
         relative, items = result
         self.remote_relative = relative
+        self.remote_tree.directory = relative
+        if self._connected_client:
+            self.remote_tree.connection_id = self._endpoint(self._connected_client.peer)
         root = self._remote_info.get("locker_path", "/")
-        self.remote_path_label.setText(posixpath.join(root, relative))
+        self.remote_path_label.setText("Computer locker / " + relative)
+        self.remote_path_label.setToolTip(posixpath.join(root, relative))
         self._fill_tree(self.remote_tree, items)
-        self.remote_empty.setText("This folder has no shared files.")
+        upload_only = not self._remote_info.get("can_download", True)
+        self.remote_empty.setText("Upload-only access: received files stay private." if upload_only else "No shared files in this folder.")
         self.remote_empty.setVisible(not items)
+        if self._connected_client:
+            modes = []
+            if self._remote_info.get("can_download", True):
+                modes.append("download permitted files")
+            if self._remote_info.get("can_upload", not self._remote_info.get("read_only", False)):
+                modes.append("upload to permitted folders")
+            self.connection_summary.setText(f"{self._connected_client.peer.name} · " + (" · ".join(modes) or "No file access"))
+        self._remember_remote_folder()
         self._update_locker_controls()
 
     def _local_open(self, item: QTreeWidgetItem) -> None:
         if item.data(0, Qt.ItemDataRole.UserRole + 1):
-            self.local_relative = item.data(0, Qt.ItemDataRole.UserRole)
-            self._refresh_local_locker()
+            self._go_local(item.data(0, Qt.ItemDataRole.UserRole))
+        else:
+            try:
+                path = self.locker.resolve(item.data(0, Qt.ItemDataRole.UserRole))
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+            except (OSError, ValueError) as error:
+                self._locker_error(str(error))
 
     def _remote_open(self, item: QTreeWidgetItem) -> None:
         if item.data(0, Qt.ItemDataRole.UserRole + 1):
             self._load_remote(item.data(0, Qt.ItemDataRole.UserRole))
 
     def _local_back(self) -> None:
-        self.local_relative = posixpath.dirname(self.local_relative)
-        self._refresh_local_locker()
+        self._go_local(posixpath.dirname(self.local_relative))
 
     def _remote_back(self) -> None:
         self._load_remote(posixpath.dirname(self.remote_relative))
@@ -1084,76 +1665,61 @@ class MainWindow(QMainWindow):
             self.locker_progress.setValue(min(99, int(done * 100 / total)) if total else 0)
 
     def _cancel_locker_transfer(self) -> None:
+        self._pending_drop = None
         self._locker_cancel.set()
         self.locker_status.setText("Cancelling… waiting for the current network request to return")
         self._update_locker_controls()
 
     def _upload_selected(self) -> None:
-        item = next(iter(self.local_tree.selectedItems()), None)
-        if item is None:
-            self._locker_error("Select a file or folder in your locker")
+        self._send_items([item.data(0, Qt.ItemDataRole.UserRole) for item in self.local_tree.selectedItems()], self.remote_relative)
+
+    def _send_items(self, sources: list[str], directory: str) -> None:
+        if not sources:
+            self._locker_error("Select files or folders in My locker")
             return
         try:
             client = self._client()
-            relative = item.data(0, Qt.ItemDataRole.UserRole)
-            source = self.locker.resolve(relative)
+            if not self._upload_targets_allowed([posixpath.basename(path) for path in sources], directory):
+                raise PermissionError("Uploading these items is not permitted here. Choose a folder that allows uploads.")
+            for source in sources:
+                self.locker.resolve(source)
         except (OSError, ValueError) as error:
             self._locker_error(str(error))
             return
-        remote_directory = self.remote_relative
         overwrite = self.replace_files.isChecked()
-        self.locker_status.setText(f"Sending {source.name}…")
-        logger.info(
-            "locker send requested source=%s remote_directory=%s", source, self.remote_relative or "/"
-        )
-        self.locker_progress.setValue(0)
-
-        def task():
-            result = copy_to_peer(
-                self.locker,
-                client,
-                relative,
-                remote_directory,
-                self._transfer_progress,
-                self._locker_cancel,
-                overwrite=overwrite,
-            )
-            return result
-
-        self._run_locker_task("send", task)
+        self._copy_names = ", ".join(posixpath.basename(path) for path in sources[:3])
+        self.locker_status.setText(f"Sending {len(sources)} item(s) to {client.peer.name}/{directory}…")
+        self._run_locker_task("send", lambda: copy_many_to_peer(
+            self.locker, client, sources, directory, self._transfer_progress, self._locker_cancel, overwrite=overwrite))
 
     def _download_selected(self) -> None:
-        item = next(iter(self.remote_tree.selectedItems()), None)
-        if item is None:
-            self._locker_error("Select a file or folder in the peer locker")
+        self._receive_items([
+            (item.data(0, Qt.ItemDataRole.UserRole), item.data(0, Qt.ItemDataRole.UserRole + 1))
+            for item in self.remote_tree.selectedItems()
+        ], self.local_relative)
+
+    def _receive_items(self, sources: list[tuple[str, bool]], directory: str) -> None:
+        if not sources:
+            self._locker_error("Select files or folders in the computer's locker")
+            return
+        if self.locker_config.read_only:
+            self._locker_error("This locker is read-only")
             return
         try:
             client = self._client()
-        except ValueError as error:
+            entries = {entry["path"]: entry for entry in (self.remote_tree._last_items or [])}
+            if not self._remote_info.get("can_download", True) or any(
+                entries.get(path, {}).get("can_download") is False for path, _ in sources
+            ):
+                raise PermissionError("Download is not permitted for this selection. Open the folder to choose permitted files.")
+        except (OSError, ValueError) as error:
             self._locker_error(str(error))
             return
-        relative = item.data(0, Qt.ItemDataRole.UserRole)
-        is_dir = item.data(0, Qt.ItemDataRole.UserRole + 1)
-        local_directory = self.local_relative
         overwrite = self.replace_files.isChecked()
-        destination = self.locker.root / local_directory / posixpath.basename(relative)
-        self.locker_status.setText(f"Receiving {posixpath.basename(relative)}…")
-        logger.info("locker receive requested remote=%s destination=%s", relative, destination)
-        self.locker_progress.setValue(0)
-
-        self._run_locker_task(
-            "receive",
-            lambda: copy_from_peer(
-                self.locker,
-                client,
-                relative,
-                is_dir,
-                local_directory,
-                self._transfer_progress,
-                self._locker_cancel,
-                overwrite=overwrite,
-            ),
-        )
+        self._copy_names = ", ".join(posixpath.basename(path) for path, _ in sources[:3])
+        self.locker_status.setText(f"Receiving {len(sources)} item(s) into My locker/{directory}…")
+        self._run_locker_task("receive", lambda: copy_many_from_peer(
+            self.locker, client, sources, directory, self._transfer_progress, self._locker_cancel, overwrite=overwrite))
 
     def _task_done(self, value) -> None:
         task_id, kind, result = value
@@ -1162,25 +1728,52 @@ class MainWindow(QMainWindow):
         self._locker_busy = False
         if kind == "connect":
             if self._locker_cancel.is_set():
+                self._pending_drop = None
                 self._disconnect_peer()
                 return
-            self._connected_client, self._remote_info, items = result
-            self._show_remote_items(("", items))
+            self._connected_client, self._remote_info, directory, items, fallback = result
+            self._connection_problem = ""
+            self._show_remote_items((directory, items))
             peer = self._connected_client.peer
             mode = " · read-only" if self._remote_info.get("read_only") else ""
             self.locker_status.setText(f"Connected to {peer.name} · {self._endpoint(peer)}{mode}")
+            if fallback:
+                self.locker_status.setText(self.locker_status.text() + " · Saved folder unavailable; showing Home.")
+            self._refresh_saved_folders()
+            try:
+                profile = self._saved_profile()
+                if profile and self.remember_code.isChecked():
+                    self.secret_store.set(profile.secret_id, self._connected_client.code)
+            except Exception as error:
+                self.incoming_notice.setText(
+                    f"Connected, but access could not be remembered in the system keyring ({type(error).__name__}).")
+                self.incoming_notice.show()
             logger.info(
                 "Connected endpoint=%s remote_root=%s", self._endpoint(peer), self._remote_info["locker_path"]
             )
+            pending, self._pending_drop = self._pending_drop, None
+            if pending and pending[0] == self.peer_combo.currentData():
+                self._perform_pending_drop(pending[1])
         elif kind == "browse":
             self._show_remote_items(result)
             self.locker_status.setText(f"Browsing {self.remote_path_label.text()}")
+        elif kind == "new_folder":
+            self._load_remote(self.remote_relative)
         elif kind in ("send", "receive", "import"):
             self.locker_progress.setValue(100)
             verb = {"send": "Sent", "receive": "Received", "import": "Added"}[kind]
             message = f"{verb} {result.files} file(s), {result.directories} folder(s), {self._human_size(result.bytes)} → {result.destination}"
+            names = getattr(self, "_copy_names", "")
+            if names:
+                message += f" · {names}"
             self.locker_status.setText(message)
             logger.info("Locker copy complete: %s", message)
+            try:
+                source = self._connected_client.peer.name if kind == "receive" and self._connected_client else "This computer"
+                self.activity_store.record(verb.lower(), source, result.destination, result.files, result.bytes)
+                self._refresh_activity()
+            except (OSError, ValueError) as error:
+                self.incoming_notice.setText(f"Files copied; could not save history: {error}")
             self._refresh_local_locker()
             # Refresh the remote view while retaining the useful completion receipt.
             client, relative = self._connected_client, self.remote_relative
@@ -1201,6 +1794,9 @@ class MainWindow(QMainWindow):
         if task_id != self._task_id:
             return
         self._locker_busy = False
+        dropped_transfer_failed = kind == "connect" and self._pending_drop is not None
+        if kind == "connect":
+            self._pending_drop = None
         if kind in ("connect", "browse"):
             self._disconnect_peer()
         prefix = (
@@ -1214,6 +1810,8 @@ class MainWindow(QMainWindow):
             self.locker_status.setText(self.locker_status.text() + f" · Could not refresh listing: {message}")
         else:
             self.locker_status.setText(f"{prefix}: {message}")
+        if dropped_transfer_failed:
+            self.locker_status.setText(self.locker_status.text() + " · Dropped items were not sent; drop them again after connecting.")
         if kind in ("send", "receive", "import"):
             self.locker_status.setText(self.locker_status.text() + " · Any completed files were kept.")
             self._refresh_local_locker()
@@ -1288,8 +1886,11 @@ class MainWindow(QMainWindow):
     def _drop_locker_paths(self, paths: list[str]) -> None:
         if self._locker_busy or self.locker_config.read_only:
             return
-        directory = self.local_relative
+        self._import_paths(paths, self.local_relative)
+
+    def _import_paths(self, paths: list[str], directory: str) -> None:
         overwrite = self.replace_files.isChecked()
+        self._copy_names = ", ".join(Path(path).name for path in paths[:3])
         self.locker_status.setText(f"Copying dropped items into {self.locker.root / directory}…")
         self.locker_progress.setValue(0)
         self._run_locker_task(
@@ -1510,6 +2111,7 @@ class MainWindow(QMainWindow):
         self._closed = True
         self._probe_cancel.set()
         self.peer_timer.stop()
+        self.locker_timer.stop()
         self._workers.shutdown(wait=False, cancel_futures=True)
         if self.discovery is not None:
             self.discovery.close()

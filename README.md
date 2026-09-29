@@ -10,7 +10,8 @@ a separate paid license. See [Licensing](#licensing).
 
 ## Transfers
 
-- Drag files and folders into Locker or the Direct SSH transfer list
+- Drag photos, files, and folders onto a locker folder or computer to copy them
+- Drag between local and remote lockers, or select several items and Send/Receive
 - Send one or more local files or a directory to a remote machine
 - Receive a remote file or directory into a local folder
 - Use `user@hostname`, a hostname, or an alias from `~/.ssh/config`
@@ -19,17 +20,19 @@ a separate paid license. See [Licensing](#licensing).
 - Safe argument handling: commands are launched without a shell
 - A consistent `~/FastFiles Locker` shared folder on every machine
 - Automatic peer discovery on the local network with mDNS
-- Side-by-side local and peer locker browsing, including file sizes
-- Pairing-code protection and folder-safe uploads/downloads
-- Named machine profiles with pairing codes stored in the desktop keyring
-- Headless allow/deny rules for controlling which locker paths are exposed
+- Side-by-side locker browsing with automatic folder refresh while idle
+- A Computers sidebar with memorable aliases and favorite folders per computer
+- Pairing codes or separate computer keys with download/upload folder permissions
+- Saved credentials in the desktop keyring; computer keys are hashed on the server
+- Global allow/deny rules for controlling which locker paths are exposed
 - Saved IPs/hostnames with automatic Locker availability checks every 15 seconds
 - Explicit overwrite controls, cancellation, and empty-folder copies in Locker
-- Persistent transfer receipts and private, rotating diagnostic logs
+- An Inbox shortcut, incoming-file notices, and persistent receive history
+- Private, rotating diagnostic logs
 
 Direct SSH uses encrypted OpenSSH connections. Locker uses **unencrypted HTTP**
-with a six-digit pairing code and should only be used on a trusted LAN or through
-an encrypted VPN. Do not expose the Locker port directly to the internet.
+with a pairing code or computer access key and should only be used on a trusted
+LAN or through an encrypted VPN. Do not expose the Locker port directly to the internet.
 Sharing rules restrict Locker only; Direct SSH uses the SSH account's filesystem
 permissions.
 
@@ -171,21 +174,64 @@ pip install -e '.[desktop]'
 fastfiles
 ```
 
-Drop files and folders into the area below **My locker** to copy them into the
-currently viewed local folder. Originals stay in place. The import runs in the
-background with progress and cancellation, follows sharing rules, and replaces
-files only when **Replace existing files** is checked. Imported files become
-available to paired peers just like other files in the shared folder.
+### Choose a computer, then a folder
+
+Use **Save as…** to give a Locker connection a memorable alias such as “Laptop”
+or “Home server.” Saved and discovered computers appear in the **Computers**
+sidebar. Select a computer, enter its pairing code or computer key, and click
+**Connect**. Check **Remember access** when saving the computer to store its
+credential in the desktop keyring. Connecting to an already saved computer also
+updates its remembered credential when this box is checked.
+Saved computers stay in the sidebar when offline and can be saved before their
+first connection.
+
+**My locker** shows this computer's shared files; **Computer locker** shows the
+selected computer's permitted folders. Double-click a folder to browse it, use
+**Up** or **Home** to navigate, and **New** to create a destination where
+you have permission. **Save folder…** gives the remote folder an alias in that
+computer's **Saved folders** menu, available while connected. Each saved computer
+remembers its last folder.
+
+In shorter windows, **⋯** opens the saved computer settings. Right-click a file
+pane for folder actions such as **Home**, **Inbox**, and **New**; the panes still
+accept drops when the separate drop areas are hidden.
+
+- Drop photos, files, or folders from your file manager into **My locker** to add
+  copies to the local shared folder.
+- Drop them into **Computer locker** to send directly to the connected computer.
+- Drag items between the two panes to send or receive copies. Ctrl/Shift-select
+  several items, or use **Send selected** and **Receive selected**.
+- Drop files or local locker items onto a computer in the sidebar to send to its
+  remembered folder. If access is not remembered, enter the code/key and connect
+  to finish the pending drop.
+
+A highlighted folder is the drop destination. Dropping on empty space or a file
+uses that pane's currently displayed folder. The Send/Receive buttons also use
+the displayed destination; check the destination label before starting. Originals
+stay in place. Transfers show progress, support cancellation, and replace files
+only when **Replace existing files** is checked.
+
+Adding photos to your locker makes them available for authorized computers to
+browse and download while this computer is online and its FastFiles app or
+service is running. Open locker folders refresh about every three seconds while
+idle. Files copy to another computer only when you send or receive them; adding
+a file does not automatically replicate it across your computers.
+
+**Inbox** opens `Inbox` inside your local locker and creates it when permitted.
+Use it as a convenient receiving folder by opening it before receiving a copy.
+Incoming files still go to the destination the sender selected. **Transfer
+history** shows recent sent, received, and imported files, including arrivals
+while the headless service was running; double-click a local receipt to open
+its folder. Incoming notices appear while the desktop app is open, and **Open folder** opens the
+currently displayed local folder.
 
 In **Direct SSH**, drop files and folders into the drop area to add them to the
 send list, then click **Send files**. In Receive mode, drop one local folder to
 choose the destination. Drop areas are disabled while their operation is running.
 
-The GUI shares its locker while it is open. Each saved Locker machine can be
-selected by alias, IP, or hostname. Use **Save as…** to save the address; check
-**Remember code in keyring** to save its code too. A machine can be saved before
-it is online. **Check now** refreshes its status immediately; periodic checks
-run in the background and never send the pairing code.
+The GUI shares its locker while it is open. Computers can also be selected by
+IP or hostname. **Check computers** refreshes availability immediately; periodic
+checks run every 15 seconds in the background and never send credentials.
 
 Online means that a compatible FastFiles service answered, not just that the
 computer is powered on. Authentication is checked when you click Connect.
@@ -193,8 +239,10 @@ Offline saved machines stay selectable for edits and retries. **Update needed**
 means the remote FastFiles version is incompatible. Version 0.2 uses Locker
 protocol 2; update both computers with `git pull` followed by the installer.
 
-To keep a machine discoverable without a desktop or a GUI dependency, install
-the headless package and initialize its configuration:
+### Receive without the desktop app
+
+To keep a machine discoverable and receiving without a desktop or a GUI
+dependency, install the headless package and initialize its configuration:
 
 ```bash
 ./install.sh --headless
@@ -214,9 +262,66 @@ Use `--no-discovery` in headless mode to disable mDNS advertising. There is also
 a [systemd user-service example](examples/fastfiles.service). Run it as the user
 who owns the locker folder, not as root.
 
+`--serve` prints the receive location and the `Inbox` location when available.
+The service creates `Inbox` if the locker is writable and sharing rules permit
+it. Keep the service running to receive after closing the desktop app; incoming
+receipts remain available the next time you open the desktop app. Sender-selected
+destinations and the same folder permissions apply to headless transfers.
+
+To inspect the most recent 100 local receipts without opening the desktop app:
+
+```bash
+fastfiles --activity
+fastfiles --activity --config /path/to/fastfiles.json
+```
+
+Activity is printed newest first with its UTC time, source, destination, file
+count, and bytes. Run it separately from `--serve` or permission-management
+commands; it reads the existing configuration and history.
+
 On the other computer, select the discovered peer and enter the six-digit code
-shown by its GUI or service. Only files below that machine's approved locker
-folder are visible; parent paths and the rest of the filesystem are rejected.
+shown by its GUI or service, or a computer key issued by its owner. Only files
+below that machine's approved locker folder are visible; parent paths and the
+rest of the filesystem are rejected. In the desktop app, open **Pair this
+computer** to reveal this computer's pairing details.
+
+### Permissions for each computer
+
+New installations retain six-digit pairing-code access. To give computers
+different permissions, open **Sharing permissions…** on the computer that owns
+the files. Create a named computer key and choose its download and upload path
+patterns. For example, allow a laptop to download `Photos/**` and upload
+`Inbox/**`, or issue an upload-only key for `Inbox/**`. Enter one rule per line;
+leave an operation's box empty to deny that operation.
+
+The owner sees each new key once. Enter it in the other computer's code/key
+field and use **Remember access** to store it in that computer's system keyring.
+The serving computer stores only a hash of the key. Names identify permissions
+for people; access follows possession of the issued key.
+
+The first computer grant disables the shared pairing code, so it cannot bypass
+the individual folder rules. Revoking the last computer key keeps pairing-code
+access disabled. Existing computer grants can be revoked, and the global
+allow/deny and read-only settings always apply in addition to each key's rules.
+To change a grant in the dialog, select it and use **Replace key and permissions**;
+the previous key stops working, so enter the replacement on that computer.
+
+Headless owners can manage the same grants from the command line:
+
+```bash
+fastfiles --grant-computer Laptop --download 'Photos/**' --upload 'Inbox/**'
+fastfiles --grant-computer Backup --download 'Photos/**' --download 'Documents/**'
+fastfiles --list-computers
+fastfiles --revoke-computer Laptop
+```
+
+Repeat `--download` and `--upload` for additional patterns; omitting either gives
+that key no permission for that operation. At least one pattern is required.
+To replace a key or its CLI permissions, revoke it and issue a new key. Add
+`--config /path/to/fastfiles.json` when using a custom configuration. CLI changes
+and manual configuration edits require restarting the service or desktop app.
+Changes made in **Sharing permissions…** apply to new requests in the running
+desktop's service; restart a separately running headless service to apply them.
 
 ### VPN connections
 
@@ -274,12 +379,13 @@ codes are rate-limited to ten attempts per minute per source IP. The pairing
 code is stored in the private local config so it can be displayed; it is not an
 encrypted transport or an internet-facing authentication system.
 
-Saved machine metadata lives in a separate
-mode-`0600` `connections.json`; remembered peer codes go through the OS keyring.
-If a keyring is unavailable, addresses can still be saved and the code entered
-when connecting. An unchecked Remember code removes the saved code for that
-endpoint. Profiles with the same IP and port share a keyring entry. The GUI
-reports malformed profile JSON instead of overwriting it.
+Saved machine aliases, favorite folders, and last-used folders live in a separate
+mode-`0600` `connections.json`; remembered codes and computer keys go through the
+OS keyring. If a keyring is unavailable, addresses and folders can still be saved
+and the credential entered when connecting. Saving with **Remember access**
+unchecked removes the saved credential for that endpoint. Profiles with the
+same IP and port share a keyring entry. The GUI reports malformed profile JSON
+instead of overwriting it.
 
 ### Copy behavior and logs
 
@@ -298,6 +404,14 @@ shows the selected SSH account/path and itemized rsync output under **Show
 details**. `~/` refers to the SSH user's home, which may differ from the desktop
 user's home. Send mode treats the remote path as a folder. Receive mode accepts
 a remote file or folder. **Dry run** only previews and copies nothing.
+
+Each locker keeps its most recent 200 file/folder transfer receipts in
+`.fastfiles-activity.json` inside the locker. This private file is excluded from
+sharing; the desktop shows the most recent 100 receipts in **Transfer history**.
+Receipts include time, source, destination, file count, and bytes, and survive
+service restarts. The desktop records sends, receives, and imports; the headless
+service records incoming uploads and folders. A folder transfer can create
+several receipts as its contents arrive.
 
 Diagnostics are stored in `~/.local/state/fastfiles/fastfiles.log` (or under
 `$XDG_STATE_HOME`), with mode `0600`, rotation at 2 MB, and three backups. The
