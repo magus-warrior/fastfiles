@@ -11,6 +11,8 @@ import os
 import re
 import secrets
 import socket
+import stat
+import sys
 import tempfile
 import threading
 import time
@@ -134,7 +136,10 @@ class Locker:
         candidate = self.root
         for part in relative.split("/") if relative else []:
             candidate = candidate / part
-            if candidate.is_symlink():
+            if candidate.is_symlink() or (
+                sys.platform == "win32" and candidate.exists()
+                and candidate.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ):
                 raise PermissionError("Symbolic links are not shared by Locker")
         candidate = candidate.resolve()
         try:
@@ -172,6 +177,15 @@ class Locker:
                 }
             )
         return result
+
+
+def commit_new_file(temporary: Path, destination: Path) -> None:
+    """Publish a closed temporary file without replacing an existing destination."""
+    if sys.platform == "win32":
+        # Windows rename fails if the destination exists; works on exFAT too.
+        temporary.rename(destination)
+    else:
+        os.link(temporary, destination)
 
 
 class LockerHTTPServer(ThreadingHTTPServer):
@@ -342,7 +356,7 @@ class LockerRequestHandler(BaseHTTPRequestHandler):
             if query.get("overwrite", ["0"])[0] == "1":
                 temporary.replace(target)
             else:
-                os.link(temporary, target)
+                commit_new_file(temporary, target)
             logger.info(
                 "upload stored client=%s path=%s bytes=%s destination=%s",
                 self.client_address[0],
@@ -534,7 +548,7 @@ class PeerClient:
                 if overwrite:
                     temporary.replace(local_path)
                 else:
-                    os.link(temporary, local_path)
+                    commit_new_file(temporary, local_path)
                 if progress:
                     progress(total, total)
                 logger.info(

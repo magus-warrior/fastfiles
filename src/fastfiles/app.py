@@ -13,7 +13,8 @@ from .logging_config import configure_logging
 
 
 def check_environment() -> int:
-    missing = [tool for tool in ("ssh", "rsync") if shutil.which(tool) is None]
+    required = ("ssh", "rsync", "cygpath") if sys.platform == "win32" else ("ssh", "rsync")
+    missing = [tool for tool in required if shutil.which(tool) is None]
     if missing:
         print("Missing required tools: " + ", ".join(missing), file=sys.stderr)
         return 1
@@ -80,7 +81,8 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(signal.SIGINT, lambda *_: stopped.set())
         signal.signal(signal.SIGTERM, lambda *_: stopped.set())
         try:
-            stopped.wait()
+            while not stopped.wait(0.5):
+                pass
         finally:
             service.stop()
         return 0
@@ -91,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         from qt_material import apply_stylesheet
     except ImportError:
         print(
-            "Desktop dependencies are missing. Run ./install.sh or pip install -e '.[desktop]'.",
+            "Desktop dependencies are missing. Run python -m pip install -e '.[desktop]'.",
             file=sys.stderr,
         )
         return 2

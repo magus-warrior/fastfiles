@@ -10,7 +10,7 @@ from pathlib import Path
 from fastfiles.core import Direction, TransferRequest, build_rsync_command, read_ssh_aliases
 
 
-@unittest.skipUnless(shutil.which("rsync"), "rsync is not installed")
+@unittest.skipUnless(os.name != "nt" and shutil.which("rsync"), "requires POSIX and rsync")
 class RsyncIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

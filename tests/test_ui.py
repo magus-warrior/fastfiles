@@ -40,7 +40,11 @@ class WindowTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.environ = patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.root / "config")})
+        self.environ = patch.dict(os.environ, {
+            "APPDATA": str(self.root / "config"),
+            "LOCALAPPDATA": str(self.root / "state"),
+            "XDG_CONFIG_HOME": str(self.root / "config"),
+        })
         self.environ.start()
         self.addCleanup(self.environ.stop)
         self.keyring = patch("fastfiles.ui.SecretStore")

@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 
+@unittest.skipIf(os.name == "nt", "Linux package-manager installer")
 class InstallerTests(unittest.TestCase):
     def run_packages(self, manager, *, headless=False, missing=True, failure=False):
         installer = (Path(__file__).resolve().parents[1] / "install.sh").read_text()

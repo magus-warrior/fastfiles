@@ -1,6 +1,7 @@
 # FastFiles
 
-FastFiles is a Linux-first desktop app for sending files and folders over SSH. It
+FastFiles is a desktop app for Linux and Windows that shares files through a LAN
+Locker or sends files and folders over SSH. Direct SSH
 uses the tools administrators already trust: `rsync` for transfers and your normal
 OpenSSH configuration for hosts, keys, jump hosts, ports, and agents.
 
@@ -33,8 +34,9 @@ permissions.
 
 ## Run it
 
-You need Python 3.10+, `ssh`, and `rsync` on the local machine. The remote machine
-also needs an SSH server and `rsync` installed.
+You need Python 3.10+. Locker transfers need FastFiles on both machines; they
+do not require SSH or rsync. Direct SSH additionally needs local `ssh` and
+`rsync`, plus an SSH server and `rsync` on the remote machine.
 
 The easiest setup is:
 
@@ -48,6 +50,62 @@ the dependencies, runs the test suite, and adds **FastFiles** to your applicatio
 launcher (desktop installs only). It is safe to run again after pulling
 an update. Arguments passed to `start.sh` are forwarded to FastFiles, so an
 always-on locker can also be started with `./start.sh --serve`.
+
+### Windows
+
+Install Python 3.10 or newer, then **double-click `start.bat`** in this folder.
+It runs setup automatically if the Python environment is missing, then opens
+FastFiles. No commands need to be typed. After setup, you can also open
+**FastFiles** from the Start menu without a console window.
+
+To install updates or repair the installation, double-click **`install.bat`**.
+If setup or startup fails, the window stays open so you can read the error.
+Keep the whole project folder together; these launchers are not standalone apps.
+
+For users who prefer PowerShell, the equivalent commands are:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+.\start.ps1
+```
+
+The installer creates `.venv`, installs the desktop dependencies, runs the tests,
+and adds a **FastFiles** Start menu shortcut for your account. Keep the checkout
+in place; rerun the installer after moving it or pulling updates. If PowerShell
+blocks the start script, use `powershell -ExecutionPolicy Bypass -File .\start.ps1`.
+No administrator access is required for the installer.
+
+For a headless Locker:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Headless
+.\start.ps1 --init-config
+.\start.ps1 --serve
+```
+
+Allow Python through Windows Firewall on your **private** network when prompted.
+Locker uses TCP port 47832 by default and mDNS discovery uses UDP 5353. You can
+connect by IP address if discovery is unavailable. Windows and Linux Locker
+instances use the same protocol.
+
+Settings and profiles are stored in `%APPDATA%\FastFiles`, logs in
+`%LOCALAPPDATA%\FastFiles`, and the default shared folder is
+`%USERPROFILE%\FastFiles Locker`. Windows files inherit the containing folder's
+access controls; POSIX permission bits apply only on Linux. Windows sharing
+patterns ignore case. Names Windows cannot represent (including device names,
+trailing dots/spaces, and alternate data streams) are rejected instead of renamed.
+Symbolic links and directory junctions are excluded from sharing.
+
+**Optional Direct SSH:** install Cygwin's `rsync` and `openssh` packages and put
+its `bin` directory (usually `C:\cygwin64\bin`) first on PATH before starting
+FastFiles. `rsync`, `ssh`, and `cygpath` must come from the same Cygwin installation.
+FastFiles uses `cygpath` to translate local drive paths for rsync. Run
+`.\start.ps1 --check` to check tool availability. Set up keys and accept the
+remote host key using Cygwin SSH first; its home/configuration may differ from
+Windows OpenSSH. The alias picker reads `%USERPROFILE%\.ssh\config`, so keep
+aliases there consistent with Cygwin's SSH configuration or enter the host
+explicitly. Native Windows OpenSSH alone and WSL rsync are not supported Direct
+SSH backends. Locker needs neither Cygwin nor WSL.
 
 ### Linux desktop libraries
 
@@ -172,7 +230,7 @@ Keep the generated identity and access-code fields when editing this file. Run
 `fastfiles --check-config`, then restart the service or GUI. A malformed config
 stops startup and is never replaced with permissive defaults.
 
-Patterns are case-sensitive relative paths using `/`. `*` matches within one
+Patterns are relative paths using `/`, case-sensitive on Linux and case-insensitive on Windows. `*` matches within one
 path segment; `**` matches zero or more segments. `public/**` includes the
 `public` folder and descendants. `**/*.key` matches `.key` files at the root and
 below it. Denying a directory denies its entire subtree. For file-specific allow
@@ -255,11 +313,13 @@ The suite runs real Locker HTTP round trips and real rsync processes using an
 isolated local transport, so it does not contact your saved machines. Qt checks
 cover layout, connection state, online status, cancellation, and error recovery.
 They are skipped in installations without desktop dependencies; rsync integration
-tests are skipped if rsync is unavailable. GitHub Actions runs the desktop suite
-on Python 3.10 and 3.14 plus a separate headless installation check.
+tests use a POSIX harness and are skipped on Windows or if rsync is unavailable.
+GitHub Actions runs the desktop suite on Linux and Windows with Python 3.10 and
+3.14, plus a separate Linux headless installation check.
 
-Linux is the tested target. Windows/macOS desktop packaging and transfers over
-real lossy networks still need platform testing. The locker directory must be
+Windows CI coverage is configured; native Windows installation and Cygwin SSH
+transfers still need a manual smoke test. macOS packaging and transfers over
+real lossy networks also need platform testing. The locker directory must be
 owned by a trusted local account; it is not a sandbox against another local
 process changing the filesystem while a request is running.
 
@@ -279,5 +339,5 @@ This is not an OSI-approved open-source license: the personal-use restriction
 excludes commercial use. See [licensing details](docs/licensing.md) for examples
 and third-party dependency information.
 
-FastFiles currently assumes rsync is present at both ends. A future transport
+Direct SSH currently assumes rsync is present at both ends. A future transport
 adapter can add SFTP fallback for Windows machines that only expose OpenSSH.

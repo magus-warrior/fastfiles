@@ -4,6 +4,9 @@ import glob
 import ipaddress
 import re
 import shlex
+import shutil
+import subprocess
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -114,16 +117,33 @@ def build_rsync_command(request: TransferRequest) -> list[str]:
     if request.direction is Direction.SEND and not path.endswith("/"):
         path += "/"  # The send form always selects a destination folder.
     remote = remote_spec(request.host, path)
-    local_paths = [
-        str(Path(path).expanduser().absolute()) + ("/" if path.endswith("/") else "")
-        for path in request.local_paths
-    ]
+    local_paths = [rsync_local_path(path) for path in request.local_paths]
     if request.direction is Direction.SEND:
         args.extend(local_paths)
         args.append(remote)
     else:
         args.extend([remote, local_paths[0]])
     return args
+
+
+def rsync_local_path(path: str) -> str:
+    absolute = str(Path(path).expanduser().absolute())
+    if sys.platform == "win32":
+        converter = shutil.which("cygpath")
+        if not converter:
+            raise ValueError("Direct SSH on Windows requires Cygwin rsync, openssh, and cygpath on PATH. "
+                             "Locker transfers do not require these tools.")
+        try:
+            absolute = subprocess.check_output(
+                [converter, "-u", "--", absolute], text=True, encoding="utf-8", timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            ).strip()
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ValueError(f"Could not convert the local path using Cygwin: {error}") from error
+        if not absolute.startswith("/") or any(c in absolute for c in "\r\n\0"):
+            raise ValueError("Cygwin returned an invalid local path")
+    separators = ("/", "\\") if sys.platform == "win32" else ("/",)
+    return absolute.rstrip("/") + "/" if path.endswith(separators) else absolute
 
 
 def display_command(args: Iterable[str]) -> str:

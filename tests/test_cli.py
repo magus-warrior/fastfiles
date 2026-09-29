@@ -17,6 +17,8 @@ class CommandLineTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.env = {
             **os.environ,
+            "APPDATA": str(self.root / "config"),
+            "LOCALAPPDATA": str(self.root / "state"),
             "XDG_CONFIG_HOME": str(self.root / "config"),
             "XDG_STATE_HOME": str(self.root / "state"),
         }
@@ -42,7 +44,8 @@ class CommandLineTests(unittest.TestCase):
         result = self.run_cli("--check-config", "--config", str(path))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(path.read_bytes(), original)
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_invalid_config_stops_serve_without_replacing_file(self):
         path = self.root / "invalid.json"
@@ -91,7 +94,8 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(process.returncode, 0, errors.decode())
             log = self.root / "state" / "fastfiles" / "fastfiles.log"
             self.assertNotIn("123456", log.read_text())
-            self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(log.stat().st_mode & 0o777, 0o600)
         finally:
             if process.poll() is None:
                 process.kill()

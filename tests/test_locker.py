@@ -1,6 +1,7 @@
 import http.client
 import io
 import json
+import os
 import socket
 import tempfile
 import threading
@@ -50,7 +51,12 @@ class PolicyTests(unittest.TestCase):
     def test_symlinks_and_temporary_files_are_not_shared(self):
         outside = Path(self.temp.name) / "outside"
         outside.write_text("private")
-        (self.root / "link").symlink_to(outside)
+        try:
+            (self.root / "link").symlink_to(outside)
+        except OSError as error:
+            if os.name == "nt" and error.winerror == 1314:
+                self.skipTest("Windows symlinks require Developer Mode or administrator privileges")
+            raise
         (self.root / ".fastfiles-working").write_text("unfinished")
         locker = Locker(self.root)
         self.assertEqual(locker.list(), [])
@@ -73,7 +79,8 @@ class PolicyTests(unittest.TestCase):
     def test_config_validates_types_and_is_private(self):
         path = Path(self.temp.name) / "config.json"
         config = LockerConfig.load(path)
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         for field, invalid in (
             ("allow_patterns", "**"),
             ("deny_patterns", None),

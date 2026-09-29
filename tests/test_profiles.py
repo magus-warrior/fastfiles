@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,7 +42,9 @@ class PersistenceTests(unittest.TestCase):
                 record = logging.LogRecord("test", logging.INFO, "", 0, "testing rollover", (), None)
                 handler.emit(record)
                 handler.emit(record)
-                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-                self.assertEqual(Path(str(path) + ".1").stat().st_mode & 0o777, 0o600)
+                if os.name != "nt":
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                if os.name != "nt":
+                    self.assertEqual(Path(str(path) + ".1").stat().st_mode & 0o777, 0o600)
             finally:
                 handler.close()

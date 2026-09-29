@@ -1,7 +1,9 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastfiles.core import (
     Direction,
@@ -16,6 +18,11 @@ from fastfiles.profiles import DirectProfile, PeerProfile, ProfileStore
 
 
 class CommandTests(unittest.TestCase):
+    def setUp(self):
+        platform = patch("fastfiles.core.sys.platform", "linux")
+        platform.start()
+        self.addCleanup(platform.stop)
+
     def test_send_command_is_a_safe_argument_list(self):
         request = TransferRequest(
             direction=Direction.SEND,
@@ -25,7 +32,7 @@ class CommandTests(unittest.TestCase):
         )
         command = build_rsync_command(request)
         self.assertEqual(command[0], "rsync")
-        self.assertIn("/tmp/a file.txt", command)
+        self.assertIn(str(Path("/tmp/a file.txt").absolute()), command)
         self.assertEqual(command[-1], "studio:./My Files/")
 
     def test_receive_order(self):
@@ -37,7 +44,7 @@ class CommandTests(unittest.TestCase):
             compress=False,
         )
         command = build_rsync_command(request)
-        self.assertEqual(command[-2:], ["me@example.com:./report.pdf", "/tmp/downloads"])
+        self.assertEqual(command[-2:], ["me@example.com:./report.pdf", str(Path("/tmp/downloads").absolute())])
         self.assertNotIn("--compress", command)
 
     def test_missing_host_is_rejected(self):
@@ -132,7 +139,8 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(store.direct()[0].name, "studio")
             self.assertEqual(store.peers()[0].address, "10.0.0.8")
             self.assertNotIn("password", json.loads(path.read_text()))
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

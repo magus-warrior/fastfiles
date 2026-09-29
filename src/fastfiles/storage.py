@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 
 def config_dir() -> Path:
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "FastFiles"
     base = os.environ.get("XDG_CONFIG_HOME")
     return Path(base) / "fastfiles" if base else Path.home() / ".config" / "fastfiles"
 
