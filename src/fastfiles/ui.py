@@ -64,7 +64,7 @@ from .locker import (
 )
 from .logging_config import log_path
 from .profiles import DirectProfile, PeerProfile, ProfileStore, SecretStore
-from .transfers import copy_from_peer, copy_to_peer
+from .transfers import copy_from_peer, copy_to_peer, import_to_locker
 
 logger = logging.getLogger("fastfiles.ui")
 
@@ -79,6 +79,12 @@ QFrame#card {
 QLabel#title { color: #172033; font-size: 30px; font-weight: 700; }
 QLabel#subtitle, QLabel#muted { color: #667085; }
 QLabel#section { color: #263247; font-weight: 600; }
+QLabel#dropArea {
+  color: #315b91; background: #f0f6ff;
+  border: 2px dashed #91afd4; border-radius: 8px; padding: 10px;
+}
+QLabel#dropArea[dragActive="true"] { background: #dcecff; border-color: #2563eb; }
+QLabel#dropArea:disabled { color: #98a2b3; border-color: #dfe3eb; background: #f5f7fb; }
 QLabel#notice { color: #8a5100; background: #fff5dd; border-radius: 6px; padding: 10px; }
 QLabel#error { color: #b42318; }
 QScrollArea { border: 0; background: #f5f7fb; }
@@ -106,6 +112,64 @@ QPushButton#danger:disabled { color: #98a2b3; }
 QProgressBar { height: 8px; border-radius: 4px; text-align: center; color: transparent; }
 QProgressBar::chunk { border-radius: 4px; }
 """
+
+
+class FileDropArea(QLabel):
+    paths_dropped = Signal(list)
+
+    def __init__(self, text: str):
+        super().__init__(text)
+        self.setAcceptDrops(True)
+        self.setObjectName("dropArea")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setWordWrap(True)
+        self.setMinimumHeight(64)
+        self.setAccessibleName(text)
+        self.directories_only = False
+
+    def _paths(self, event) -> list[str]:
+        if not self.isEnabled() or not event.mimeData().hasUrls():
+            return []
+        urls = event.mimeData().urls()
+        if not urls or any(not url.isLocalFile() for url in urls):
+            return []
+        paths = list(dict.fromkeys(url.toLocalFile() for url in urls))
+        if self.directories_only and (len(paths) != 1 or not Path(paths[0]).is_dir()):
+            return []
+        if any(not (Path(path).is_file() or Path(path).is_dir()) for path in paths):
+            return []
+        return paths
+
+    def _highlight(self, active: bool) -> None:
+        self.setProperty("dragActive", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def dragEnterEvent(self, event) -> None:
+        if self._paths(event):
+            self._highlight(True)
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        self.dragEnterEvent(event)
+
+    def dragLeaveEvent(self, event) -> None:
+        self._highlight(False)
+        event.accept()
+
+    def dropEvent(self, event) -> None:
+        self._highlight(False)
+        paths = self._paths(event)
+        if not paths:
+            event.ignore()
+            return
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+        self.paths_dropped.emit(paths)
 
 
 class LockerSignals(QObject):
@@ -309,6 +373,9 @@ class MainWindow(QMainWindow):
         path_header.addWidget(self.remove_paths)
         layout.addLayout(path_header)
 
+        self.direct_drop = FileDropArea("Drop files and folders here to add them to the transfer")
+        self.direct_drop.paths_dropped.connect(self._drop_direct_paths)
+        layout.addWidget(self.direct_drop)
         self.paths = QListWidget()
         self.paths.setMinimumHeight(100)
         self.paths.setMaximumHeight(100)
@@ -515,13 +582,17 @@ class MainWindow(QMainWindow):
         browsers.addWidget(remote_card)
         outer.addLayout(browsers, 1)
         self.local_empty = QLabel(
-            "Your locker is empty. Open the folder below to add files, then click Refresh."
+            "Your locker is empty. Drop files or folders below to add them."
         )
         self.remote_empty = QLabel("Select a machine and enter its pairing code to browse its locker.")
         for label, card in ((self.local_empty, local_card), (self.remote_empty, remote_card)):
             label.setObjectName("muted")
             label.setWordWrap(True)
             card.layout().addWidget(label)
+
+        self.locker_drop = FileDropArea("Drop files and folders here to copy into My locker")
+        self.locker_drop.paths_dropped.connect(self._drop_locker_paths)
+        local_card.layout().addWidget(self.locker_drop)
 
         actions = QHBoxLayout()
         self.download_peer = QPushButton("← Receive")
@@ -893,6 +964,7 @@ class MainWindow(QMainWindow):
         ):
             widget.setEnabled(idle)
         self.delete_peer.setEnabled(idle and str(self.peer_combo.currentData()).startswith("saved:"))
+        self.locker_drop.setEnabled(idle and not self.locker_config.read_only)
         self.local_tree.setEnabled(idle)
         self.remote_tree.setEnabled(idle and connected)
         self.local_back.setEnabled(idle and bool(self.local_relative))
@@ -1103,16 +1175,16 @@ class MainWindow(QMainWindow):
         elif kind == "browse":
             self._show_remote_items(result)
             self.locker_status.setText(f"Browsing {self.remote_path_label.text()}")
-        elif kind in ("send", "receive"):
+        elif kind in ("send", "receive", "import"):
             self.locker_progress.setValue(100)
-            verb = "Sent" if kind == "send" else "Received"
+            verb = {"send": "Sent", "receive": "Received", "import": "Added"}[kind]
             message = f"{verb} {result.files} file(s), {result.directories} folder(s), {self._human_size(result.bytes)} → {result.destination}"
             self.locker_status.setText(message)
             logger.info("Locker copy complete: %s", message)
             self._refresh_local_locker()
             # Refresh the remote view while retaining the useful completion receipt.
             client, relative = self._connected_client, self.remote_relative
-            if client:
+            if client and kind != "import":
                 self._run_locker_task(
                     "refresh_after_copy", lambda: (message, relative, client.list(relative))
                 )
@@ -1135,15 +1207,16 @@ class MainWindow(QMainWindow):
             "Cancelled"
             if cancelled
             else "Transfer stopped"
-            if kind in ("send", "receive")
+            if kind in ("send", "receive", "import")
             else "Connection failed"
         )
         if kind == "refresh_after_copy":
             self.locker_status.setText(self.locker_status.text() + f" · Could not refresh listing: {message}")
         else:
             self.locker_status.setText(f"{prefix}: {message}")
-        if kind in ("send", "receive"):
+        if kind in ("send", "receive", "import"):
             self.locker_status.setText(self.locker_status.text() + " · Any completed files were kept.")
+            self._refresh_local_locker()
         self._update_peers(self._discovered)
         self._update_locker_controls()
 
@@ -1171,6 +1244,12 @@ class MainWindow(QMainWindow):
         self.remote_label.setText(
             "Remote source file or folder" if receiving else "Remote destination folder"
         )
+        self.direct_drop.directories_only = receiving
+        self.direct_drop.setText(
+            "Drop one destination folder here" if receiving
+            else "Drop files and folders here to add them to the transfer"
+        )
+        self.direct_drop.setAccessibleName(self.direct_drop.text())
         self.local_label.setText("Local destination" if receiving else "Local files and folders")
         self.pick_files.setVisible(not receiving)
         self.pick_folder.setText("Choose destination" if receiving else "Add folder")
@@ -1205,6 +1284,31 @@ class MainWindow(QMainWindow):
             self._update_destination_preview()
         else:
             self._add_paths([folder])
+
+    def _drop_locker_paths(self, paths: list[str]) -> None:
+        if self._locker_busy or self.locker_config.read_only:
+            return
+        directory = self.local_relative
+        overwrite = self.replace_files.isChecked()
+        self.locker_status.setText(f"Copying dropped items into {self.locker.root / directory}…")
+        self.locker_progress.setValue(0)
+        self._run_locker_task(
+            "import",
+            lambda: import_to_locker(
+                self.locker, paths, directory, self._transfer_progress,
+                self._locker_cancel, overwrite=overwrite,
+            ),
+        )
+
+    def _drop_direct_paths(self, paths: list[str]) -> None:
+        if self._process is not None:
+            return
+        if self.direction is Direction.RECEIVE:
+            if len(paths) != 1 or not Path(paths[0]).is_dir():
+                return
+            self._local_paths.clear()
+            self.paths.clear()
+        self._add_paths(paths)
 
     def _add_paths(self, paths: list[str]) -> None:
         for path in paths:
@@ -1382,6 +1486,7 @@ class MainWindow(QMainWindow):
             self.delete_direct_profile,
             self.paths,
             self.remove_paths,
+            self.direct_drop,
         ):
             widget.setEnabled(not running)
 

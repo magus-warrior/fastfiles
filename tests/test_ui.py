@@ -9,7 +9,8 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
-    from PySide6.QtCore import QPoint, QProcess, Qt
+    from PySide6.QtCore import QMimeData, QPoint, QPointF, QProcess, Qt, QUrl
+    from PySide6.QtGui import QDragEnterEvent, QDropEvent
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QMessageBox
     from qt_material import apply_stylesheet
@@ -105,6 +106,57 @@ class WindowTests(unittest.TestCase):
                 self.assertLessEqual(point.x() + button.width(), self.window.width())
             self.assertGreaterEqual(self.window.paths.height(), 100)
             self.assertGreater(self.window.compress.y(), self.window.paths.y() + self.window.paths.height())
+
+    def drop_paths(self, area, paths):
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
+        enter = QDragEnterEvent(QPoint(10, 10), Qt.DropAction.CopyAction, mime,
+                               Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.app.sendEvent(area, enter)
+        drop = QDropEvent(QPointF(10, 10), Qt.DropAction.CopyAction, mime,
+                          Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.app.sendEvent(area, drop)
+        return drop.isAccepted()
+
+    def test_direct_drop_queues_files_folders_and_receive_destination(self):
+        w = self.window
+        w.tabs.setCurrentIndex(1)
+        source = self.root / "file with spaces.txt"
+        source.write_text("hello")
+        folder = self.root / "folder"
+        folder.mkdir()
+        self.assertTrue(self.drop_paths(w.direct_drop, [source, folder]))
+        self.drop_paths(w.direct_drop, [source])
+        self.assertEqual(w._local_paths, [str(source), str(folder)])
+        self.assertIsNone(w._process)
+        w.receive_radio.setChecked(True)
+        self.assertFalse(self.drop_paths(w.direct_drop, [source]))
+        self.assertEqual(w._local_paths, [])
+        self.assertTrue(self.drop_paths(w.direct_drop, [folder]))
+        self.assertEqual(w._local_paths, [str(folder)])
+        w._set_running(True)
+        self.assertFalse(w.direct_drop.isEnabled())
+        w._set_running(False)
+
+    def test_locker_drop_copies_into_current_folder_and_refreshes(self):
+        w = self.window
+        source = self.root / "dropped"
+        (source / "empty").mkdir(parents=True)
+        (source / "file.txt").write_text("hello")
+        (w.locker.root / "destination").mkdir()
+        w.local_relative = "destination"
+        self.assertTrue(self.drop_paths(w.locker_drop, [source]))
+        self.assertFalse(w.locker_drop.isEnabled())
+        self.wait_for(lambda: not w._locker_busy)
+        target = w.locker.root / "destination" / "dropped"
+        self.assertEqual((target / "file.txt").read_text(), "hello")
+        self.assertTrue((target / "empty").is_dir())
+        self.assertTrue((source / "file.txt").exists())
+        self.assertIn("Added 1 file", w.locker_status.text())
+        self.assertEqual(w.local_tree.topLevelItemCount(), 1)
+        w.locker_config.read_only = True
+        w._update_locker_controls()
+        self.assertFalse(w.locker_drop.isEnabled())
 
     def test_saved_ip_stays_selectable_and_status_tracks_service(self):
         server, stop = self.server()

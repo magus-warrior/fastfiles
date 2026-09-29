@@ -10,6 +10,7 @@ a separate paid license. See [Licensing](#licensing).
 
 ## Transfers
 
+- Drag files and folders into Locker or the Direct SSH transfer list
 - Send one or more local files or a directory to a remote machine
 - Receive a remote file or directory into a local folder
 - Use `user@hostname`, a hostname, or an alias from `~/.ssh/config`
@@ -169,6 +170,16 @@ python3 -m venv .venv
 pip install -e '.[desktop]'
 fastfiles
 ```
+
+Drop files and folders into the area below **My locker** to copy them into the
+currently viewed local folder. Originals stay in place. The import runs in the
+background with progress and cancellation, follows sharing rules, and replaces
+files only when **Replace existing files** is checked. Imported files become
+available to paired peers just like other files in the shared folder.
+
+In **Direct SSH**, drop files and folders into the drop area to add them to the
+send list, then click **Send files**. In Receive mode, drop one local folder to
+choose the destination. Drop areas are disabled while their operation is running.
 
 The GUI shares its locker while it is open. Each saved Locker machine can be
 selected by alias, IP, or hostname. Use **Save as…** to save the address; check
