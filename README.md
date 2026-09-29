@@ -51,6 +51,23 @@ launcher (desktop installs only). It is safe to run again after pulling
 an update. Arguments passed to `start.sh` are forwarded to FastFiles, so an
 always-on locker can also be started with `./start.sh --serve`.
 
+### Updating from Git
+
+Close FastFiles before updating. On Windows, double-click **`update.bat`**.
+On Linux, run **`./update.sh`** (or choose **Run in Terminal** in a file manager
+that supports launching shell scripts).
+
+Both updaters pull the current branch's configured upstream with `git pull
+--ff-only --no-rebase`, then rerun the installer and its checks. Git must be
+installed and the folder must be a Git clone, not a downloaded ZIP. Local changes,
+a missing upstream, or diverged history stop the update without running the
+installer. No changes are automatically discarded or stashed. If installation
+fails after pulling, the downloaded code stays in place; rerun the installer
+after fixing the reported error. Restart FastFiles when the update finishes.
+
+Headless installations should use `./update.sh --headless` or
+`update.bat -Headless` to keep desktop dependencies optional.
+
 ### Windows
 
 Install Python 3.10 or newer, then **double-click `start.bat`** in this folder.
@@ -58,7 +75,8 @@ It runs setup automatically if the Python environment is missing, then opens
 FastFiles. No commands need to be typed. After setup, you can also open
 **FastFiles** from the Start menu without a console window.
 
-To install updates or repair the installation, double-click **`install.bat`**.
+To download updates from Git and install them, double-click **`update.bat`**.
+To repair the current installation without downloading updates, use **`install.bat`**.
 If setup or startup fails, the window stays open so you can read the error.
 Keep the whole project folder together; these launchers are not standalone apps.
 
