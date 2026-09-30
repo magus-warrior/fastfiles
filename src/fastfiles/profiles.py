@@ -87,7 +87,25 @@ class ProfileStore:
                 raise ValueError(f"Invalid saved connection in {self.path}; file left unchanged") from error
             if len({profile.name for profile in profiles}) != len(profiles):
                 raise ValueError(f"Duplicate aliases in {self.path}")
+        hidden = value.get("hidden_peers", [])
+        if not isinstance(hidden, list) or any(not isinstance(item, str) for item in hidden):
+            raise ValueError(f"hidden_peers must be a list of addresses in {self.path}")
         return value
+
+    def hidden_peers(self) -> set[str]:
+        return set(self._read().get("hidden_peers", []))
+
+    def forget_peer(self, endpoint: str, name: str | None = None) -> None:
+        data = self._read()
+        if name is not None:
+            data["peers"] = [item for item in data.get("peers", []) if item["name"] != name]
+        data["hidden_peers"] = sorted(set(data.get("hidden_peers", [])) | {endpoint})
+        self._write(data)
+
+    def restore_hidden_peers(self) -> None:
+        data = self._read()
+        data["hidden_peers"] = []
+        self._write(data)
 
     def _write(self, value: dict) -> None:
         write_json(self.path, value)

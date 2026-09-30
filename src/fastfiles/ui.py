@@ -623,6 +623,7 @@ class MainWindow(QMainWindow):
         self.computers.transfer_dropped.connect(self._drop_on_computer)
         side.addWidget(self.computers, 1)
         self.check_peers = QPushButton("Find computers")
+        self.check_peers.setToolTip("Check availability and show forgotten discovered computers again")
         side.addWidget(self.check_peers)
         self.availability_label = QLabel("Saved computers remain here when offline.")
         self.availability_label.setObjectName("muted")
@@ -669,6 +670,7 @@ class MainWindow(QMainWindow):
         peer_row.addWidget(self.peer_code)
         peer_row.addWidget(self.connect_peer)
         peer_row.addWidget(self.connection_options)
+        peer_row.addWidget(self.delete_peer)
         connection_layout.addLayout(peer_row)
         self.profile_options = QWidget()
         profile_row = QHBoxLayout(self.profile_options)
@@ -678,7 +680,7 @@ class MainWindow(QMainWindow):
         self.edit_peer.clicked.connect(lambda: self._edit_profile(True))
         profile_row.addWidget(self.edit_peer)
         profile_row.addWidget(self.save_peer)
-        profile_row.addWidget(self.delete_peer)
+        self.delete_peer.setToolTip("Forget saved access and hide this computer from discovery. Find computers shows it again.")
         connection_layout.addWidget(self.profile_options)
         self.profile_options.hide()
         self.connection_options.toggled.connect(self.profile_options.setVisible)
@@ -755,11 +757,16 @@ class MainWindow(QMainWindow):
         self.local_manage = QPushButton("Manage selected…")
         manage_menu = QMenu(self.local_manage)
         self.rename_local_action = manage_menu.addAction("Rename…", self._rename_local)
-        self.trash_local_action = manage_menu.addAction("Move to Trash…", self._trash_local)
+        self.trash_local_action = manage_menu.addAction("Delete — move to Trash…", self._trash_local)
+        self.permanent_local_action = manage_menu.addAction("Delete permanently…", self._delete_local_permanently)
         self.local_manage.setMenu(manage_menu)
         local_actions = QHBoxLayout()
         local_actions.addWidget(self.add_locker_files, 1)
         local_actions.addWidget(self.local_manage, 1)
+        self.delete_local = QPushButton("Delete…")
+        self.delete_local.setToolTip("Move selected files and folders to Trash")
+        self.delete_local.clicked.connect(self._trash_local)
+        local_actions.addWidget(self.delete_local)
         local_card.layout().insertLayout(2, local_actions)
         for key, callback in (("F2", self._rename_local), ("Delete", self._trash_local)):
             shortcut = QShortcut(QKeySequence(key), self.local_tree)
@@ -844,7 +851,7 @@ class MainWindow(QMainWindow):
         self.peer_code.returnPressed.connect(self._connect_peer)
         self.save_peer.clicked.connect(self._save_peer_profile)
         self.delete_peer.clicked.connect(self._delete_peer_profile)
-        self.check_peers.clicked.connect(self._check_availability)
+        self.check_peers.clicked.connect(self._find_computers)
         self.peer_combo.currentTextChanged.connect(self._peer_changed)
         self.peer_code.textEdited.connect(self._disconnect_peer)
         self.local_back.clicked.connect(self._local_back)
@@ -958,6 +965,7 @@ class MainWindow(QMainWindow):
         if not remote:
             menu.addAction(self.rename_local_action)
             menu.addAction(self.trash_local_action)
+            menu.addAction(self.permanent_local_action)
             menu.addSeparator()
         buttons = (
             (self.download_peer, self.remote_home, self.remote_new_folder, self.save_folder)
@@ -1024,11 +1032,37 @@ class MainWindow(QMainWindow):
                     raise ValueError("The locker itself cannot be removed")
                 file = QFile(str(source))
                 if not file.moveToTrash():
-                    raise OSError(f"Could not move {source.name} to Trash: {file.errorString()}")
+                    raise OSError(f"Could not move {source.name} to Trash: {file.errorString()}. "
+                                  "Use Manage selected → Delete permanently if you want to remove it without Trash.")
                 moved += 1
             self.locker_status.setText(f"Moved {moved} item(s) to Trash.")
         except (OSError, ValueError) as error:
             self._locker_error(f"{moved} item(s) moved to Trash. {error}")
+        finally:
+            self._refresh_local_locker()
+
+    def _delete_local_permanently(self) -> None:
+        items = self.local_tree.selectedItems()
+        if self._locker_busy or self.locker_config.read_only or not items:
+            return
+        paths = [item.data(0, Qt.ItemDataRole.UserRole) for item in items]
+        if not self._confirm("Delete permanently", f"Permanently delete {len(paths)} selected item(s)? "
+                             "This includes all contents of selected folders and cannot be undone."):
+            return
+        deleted = 0
+        try:
+            for relative in paths:
+                source = self.locker.resolve(relative)
+                if source == self.locker.root:
+                    raise ValueError("The locker itself cannot be removed")
+                if source.is_dir():
+                    shutil.rmtree(source)
+                else:
+                    source.unlink()
+                deleted += 1
+            self.locker_status.setText(f"Permanently deleted {deleted} item(s).")
+        except (OSError, ValueError) as error:
+            self._locker_error(f"{deleted} item(s) deleted. {error}")
         finally:
             self._refresh_local_locker()
 
@@ -1112,10 +1146,8 @@ class MainWindow(QMainWindow):
         index = self.peer_combo.findData(key)
         if index >= 0:
             self.peer_combo.setCurrentIndex(index)
-            if self._connected_client is None and self.peer_code.text().strip():
-                self._connect_peer()
-            elif self._connected_client is None:
-                self.peer_code.setFocus()
+            if self._connected_client is None:
+                self.locker_status.setText("Computer selected. Connect to browse, or use Forget to remove it.")
 
     def _drop_on_computer(self, key: str, payload: dict) -> None:
         if self._locker_busy:
@@ -1561,22 +1593,36 @@ class MainWindow(QMainWindow):
         self._check_availability()
 
     def _delete_peer_profile(self) -> None:
-        key = self.peer_combo.currentData() or ""
-        if not key.startswith("saved:"):
-            return
-        name = key.removeprefix("saved:")
-        if not self._confirm("Delete saved machine", f"Remove {name} and its remembered code?"):
+        if self._locker_busy:
             return
         try:
-            profile = next(item for item in self.profile_store.peers() if item.name == name)
-            self.profile_store.delete_peer(name)
-            if not any(item.secret_id == profile.secret_id for item in self.profile_store.peers()):
-                self.secret_store.delete(profile.secret_id)
+            peer = self._selected_peer()
+            if peer is None:
+                return
+            profile = self._saved_profile()
+            if not self._confirm("Forget computer", f"Forget {peer.name}? Saved access will be removed "
+                                 "when no other alias uses it. This computer will stay hidden until you "
+                                 "choose Find computers. Files on both computers are unchanged."):
+                return
+            self.profile_store.forget_peer(self._endpoint(peer), profile.name if profile else None)
             self._disconnect_peer()
             self.peer_combo.setCurrentIndex(-1)
             self.peer_combo.setEditText("")
             self._update_peers(self._discovered)
-        except (OSError, ValueError, StopIteration) as error:
+            self.locker_status.setText(f"Forgot {peer.name}. Find computers can show it again.")
+            if profile and not any(item.secret_id == profile.secret_id for item in self.profile_store.peers()):
+                self.secret_store.delete(profile.secret_id)
+        except (OSError, ValueError) as error:
+            self._locker_error(str(error))
+
+    def _find_computers(self) -> None:
+        if self._locker_busy:
+            return
+        try:
+            self.profile_store.restore_hidden_peers()
+            self._update_peers(self._discovered)
+            self._check_availability()
+        except (OSError, ValueError) as error:
             self._locker_error(str(error))
 
     def _confirm(self, title: str, message: str) -> bool:
@@ -1689,13 +1735,16 @@ class MainWindow(QMainWindow):
         previous = self.peers.get(current_id)
         try:
             profiles = self.profile_store.peers()
+            hidden = self.profile_store.hidden_peers()
         except (OSError, ValueError) as error:
             profiles = []
+            hidden = set()
             self.availability_label.setText(str(error))
             logger.error("Cannot read saved peers: %s", error)
         saved = [Peer(f"saved:{p.name}", p.name, p.address, p.port) for p in profiles]
         endpoints = {(peer.address, peer.port) for peer in saved}
-        combined = saved + [peer for peer in peers if (peer.address, peer.port) not in endpoints]
+        combined = saved + [peer for peer in peers if (peer.address, peer.port) not in endpoints
+                            and self._endpoint(peer) not in hidden]
         self.peers = {peer.device_id: peer for peer in combined}
         self.peer_combo.blockSignals(True)
         self.peer_combo.clear()
@@ -1721,7 +1770,8 @@ class MainWindow(QMainWindow):
         self.computers.clear()
         for peer in combined:
             status = self._peer_status.get((peer.address, peer.port), "Checking")
-            item = QListWidgetItem(f"{peer.name}\n{status}")
+            origin = "Saved" if peer.device_id.startswith("saved:") else "Discovered"
+            item = QListWidgetItem(f"{peer.name}\n{status} · {origin}")
             item.setData(Qt.ItemDataRole.UserRole, peer.device_id)
             item.setToolTip(f"{self._endpoint(peer)} · Drop files to send")
             self.computers.addItem(item)
@@ -1847,7 +1897,13 @@ class MainWindow(QMainWindow):
         self.local_manage.setEnabled(editable and bool(selected))
         self.rename_local_action.setEnabled(editable and len(selected) == 1)
         self.trash_local_action.setEnabled(editable and bool(selected))
-        self.delete_peer.setEnabled(idle and str(self.peer_combo.currentData()).startswith("saved:"))
+        self.permanent_local_action.setEnabled(editable and bool(selected))
+        self.delete_local.setEnabled(editable and bool(selected))
+        try:
+            selected_peer = self._selected_peer()
+        except ValueError:
+            selected_peer = None
+        self.delete_peer.setEnabled(idle and selected_peer is not None)
         self.locker_drop.setEnabled(idle and not self.locker_config.read_only)
         self.remote_drop.setEnabled(idle and writable)
         self.local_tree.setEnabled(idle)

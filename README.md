@@ -301,8 +301,9 @@ protocol 2; update both computers with `git pull` followed by the installer.
 
 ### Managing files and saved computers
 
-Select local files or folders and choose **Manage selected…** to rename an item
-or move selected items to the system Trash. F2 renames and Delete opens the Trash
+Select local files or folders and click **Delete…** to move them to the system
+Trash. **Manage selected…** also offers rename and a separately confirmed
+**Delete permanently…** option for filesystems without Trash support. F2 renames and Delete opens the Trash
 confirmation while the local file list has focus. Existing names are never
 overwritten; if Trash is unavailable, the item stays in place. These actions
 respect the locker's read-only setting. Remote file rename and deletion are not
@@ -311,6 +312,11 @@ available through the current Locker protocol.
 Open the computer settings (**⋯ → Edit…**) to update a saved computer's name,
 address, or default folder. Favorites are preserved. Changing the address requires
 access for that endpoint; the old endpoint's credential is not copied to it.
+The visible **Forget** button removes saved computers or hides discovered ones.
+Hidden computers stay hidden across restarts until you click **Find computers**;
+that action does not restore deleted credentials. Entries are labeled **Saved**
+or **Discovered** in the sidebar. Selecting a computer lets you manage it without
+starting a connection; click **Connect** to browse.
 Saved SSH machines also have an **Edit…** button. Use **Edit favorite…** to rename
 a favorite, change its folder path, or remove the bookmark.
 

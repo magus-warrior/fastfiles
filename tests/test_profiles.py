@@ -9,6 +9,20 @@ from fastfiles.profiles import DirectProfile, PeerProfile, ProfileStore
 
 
 class PersistenceTests(unittest.TestCase):
+    def test_forgotten_peers_persist_and_restore_without_losing_other_profiles(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "connections.json"
+            store = ProfileStore(path)
+            store.save_peer(PeerProfile("Home", "home", 47832))
+            store.save_direct(DirectProfile("SSH", "host", "~/"))
+            store.forget_peer("home:47832", "Home")
+            reloaded = ProfileStore(path)
+            self.assertEqual(reloaded.peers(), [])
+            self.assertEqual(reloaded.hidden_peers(), {"home:47832"})
+            reloaded.restore_hidden_peers()
+            self.assertEqual(store.hidden_peers(), set())
+            self.assertEqual(len(store.direct()), 1)
+
     def test_rename_profile_preserves_metadata_and_rejects_collisions(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = ProfileStore(Path(temporary) / "connections.json")

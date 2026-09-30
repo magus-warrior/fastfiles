@@ -63,6 +63,70 @@ class WindowTests(unittest.TestCase):
         self.app.processEvents()
         self.addCleanup(self.close_window)
 
+    def test_forget_discovered_computer_stays_hidden_until_find(self):
+        w = self.window
+        peer = Peer("discovered-device", "Nearby laptop", "192.0.2.20", 47832)
+        w._update_peers([peer])
+        w.peer_combo.setCurrentIndex(0)
+        self.assertTrue(w.delete_peer.isEnabled())
+        self.assertTrue(w.delete_peer.isVisible())
+        self.assertIn("Discovered", w.computers.item(0).text())
+        with patch.object(w, "_confirm", return_value=True):
+            w.delete_peer.click()
+        self.assertEqual(w.computers.count(), 0)
+        w._update_peers([peer])
+        self.assertEqual(w.computers.count(), 0)
+        self.assertEqual(w.profile_store.hidden_peers(), {"192.0.2.20:47832"})
+        with patch.object(w, "_check_availability"):
+            w.check_peers.click()
+        self.assertEqual(w.computers.count(), 1)
+
+    def test_forget_saved_computer_removes_credentials_without_rediscovery(self):
+        w = self.window
+        profile = PeerProfile("Laptop", "192.0.2.21", 47832)
+        w.profile_store.save_peer(profile)
+        peer = Peer("nearby", "Laptop", profile.address, profile.port)
+        w._update_peers([peer])
+        with patch.object(w, "_connect_peer") as connect:
+            w._computer_selected(w.computers.item(0))
+            connect.assert_not_called()
+        with patch.object(w, "_confirm", return_value=False):
+            w.delete_peer.click()
+        self.assertEqual(w.profile_store.peers(), [profile])
+        with patch.object(w, "_confirm", return_value=True):
+            w.delete_peer.click()
+        self.assertEqual(w.profile_store.peers(), [])
+        w.secret_store.delete.assert_called_once_with(profile.secret_id)
+        self.assertEqual(w.computers.count(), 0)
+        self.assertEqual(w.peer_code.text(), "")
+
+    def test_forget_alias_keeps_credentials_used_by_another_alias(self):
+        w = self.window
+        for name in ("One", "Two"):
+            w.profile_store.save_peer(PeerProfile(name, "192.0.2.22", 47832))
+        w._update_peers([])
+        w.peer_combo.setCurrentIndex(0)
+        with patch.object(w, "_confirm", return_value=True):
+            w.delete_peer.click()
+        self.assertEqual(len(w.profile_store.peers()), 1)
+        w.secret_store.delete.assert_not_called()
+
+    def test_permanent_delete_requires_confirmation_and_refreshes_folder(self):
+        w = self.window
+        folder = w.locker.root / "remove-me"
+        folder.mkdir()
+        (folder / "nested.txt").write_text("sample")
+        self.select_local("remove-me")
+        self.assertTrue(w.delete_local.isEnabled())
+        with patch.object(w, "_confirm", return_value=False):
+            w._delete_local_permanently()
+        self.assertTrue(folder.exists())
+        with patch.object(w, "_confirm", return_value=True):
+            w.permanent_local_action.trigger()
+        self.assertFalse(folder.exists())
+        self.assertFalse(w.delete_local.isEnabled())
+        self.assertIn("Permanently deleted 1", w.locker_status.text())
+
     def select_local(self, name):
         self.window._refresh_local_locker()
         tree = self.window.local_tree
