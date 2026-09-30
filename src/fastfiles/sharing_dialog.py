@@ -83,6 +83,9 @@ class SharingDialog(QDialog):
         layout.addWidget(self.replace_label)
         self.save_button = QPushButton("Create computer key")
         self.save_button.clicked.connect(self._save)
+        self.update_button = QPushButton("Save name and permissions")
+        self.update_button.clicked.connect(self._update_permissions)
+        layout.addWidget(self.update_button)
         layout.addWidget(self.save_button)
 
         self.error_label = QLabel()
@@ -158,6 +161,7 @@ class SharingDialog(QDialog):
         self.download_edit.setPlainText("**")
         self.upload_edit.setPlainText("Inbox/**")
         self.save_button.setText("Create computer key")
+        self.update_button.setEnabled(False)
         self.revoke_button.setEnabled(False)
         self.replace_label.hide()
         self.error_label.clear()
@@ -170,6 +174,7 @@ class SharingDialog(QDialog):
         items = self.computers.selectedItems()
         if not items:
             self._selected_name = None
+            self.update_button.setEnabled(False)
             self.revoke_button.setEnabled(False)
             self.replace_label.hide()
             self.save_button.setText("Create computer key")
@@ -181,6 +186,7 @@ class SharingDialog(QDialog):
         self.download_edit.setPlainText("\n".join(entry["download_patterns"]))
         self.upload_edit.setPlainText("\n".join(entry["upload_patterns"]))
         self.save_button.setText("Replace key and permissions")
+        self.update_button.setEnabled(True)
         self.revoke_button.setEnabled(True)
         self.replace_label.show()
 
@@ -193,6 +199,22 @@ class SharingDialog(QDialog):
         # failed writes roll back before requests can see changed permissions.
         self.config.save_computer_permissions(entries, self.config_path)
         self.changed = True
+
+    def _update_permissions(self) -> None:
+        if self._selected_name is None:
+            return
+        try:
+            entries = [dict(item) for item in self.config.computer_permissions]
+            entry = next(item for item in entries if item["name"] == self._selected_name)
+            entry.update(name=self.name_edit.text().strip(),
+                         download_patterns=self._patterns(self.download_edit),
+                         upload_patterns=self._patterns(self.upload_edit))
+            self._persist(entries)
+        except (ValueError, OSError) as error:
+            self._show_error(error)
+            return
+        self._refresh(entry["name"])
+        self.error_label.setText("Changes saved. The existing access key still works.")
 
     def _save(self) -> None:
         self.error_label.clear()

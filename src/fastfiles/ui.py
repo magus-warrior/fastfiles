@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QObject, QProcess, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QDir, QFile, QObject, QProcess, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -365,6 +366,9 @@ class MainWindow(QMainWindow):
         self.save_direct_profile = QPushButton("Save as…")
         self.delete_direct_profile = QPushButton("Delete")
         profiles.addWidget(self.direct_profile, 1)
+        self.edit_direct_profile = QPushButton("Edit…")
+        self.edit_direct_profile.clicked.connect(lambda: self._edit_profile(False))
+        profiles.addWidget(self.edit_direct_profile)
         profiles.addWidget(self.save_direct_profile)
         profiles.addWidget(self.delete_direct_profile)
         layout.addLayout(profiles)
@@ -613,6 +617,8 @@ class MainWindow(QMainWindow):
         self.computers.setMinimumHeight(235)
         self.computers.setWordWrap(True)
         self.computers.setToolTip("Select a computer to browse. Drop files on it to send to its saved folder.")
+        self.computers.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.computers.customContextMenuRequested.connect(self._computer_menu)
         self.computers.itemClicked.connect(self._computer_selected)
         self.computers.transfer_dropped.connect(self._drop_on_computer)
         side.addWidget(self.computers, 1)
@@ -668,6 +674,9 @@ class MainWindow(QMainWindow):
         profile_row = QHBoxLayout(self.profile_options)
         profile_row.setContentsMargins(0, 0, 0, 0)
         profile_row.addStretch()
+        self.edit_peer = QPushButton("Edit…")
+        self.edit_peer.clicked.connect(lambda: self._edit_profile(True))
+        profile_row.addWidget(self.edit_peer)
         profile_row.addWidget(self.save_peer)
         profile_row.addWidget(self.delete_peer)
         connection_layout.addWidget(self.profile_options)
@@ -719,6 +728,9 @@ class MainWindow(QMainWindow):
         self.save_folder.clicked.connect(self._save_remote_folder)
         folders_row = QHBoxLayout()
         folders_row.addWidget(self.remote_folders, 1)
+        self.edit_favorite = QPushButton("Edit favorite…")
+        self.edit_favorite.clicked.connect(lambda: self._favorite_menu(self.remote_folders.rect().bottomLeft()))
+        folders_row.addWidget(self.edit_favorite)
         folders_row.addWidget(self.save_folder)
         self.quick_save_peer = QPushButton("Save computer")
         self.quick_save_peer.setToolTip("Save this computer, its access code, and its last folder together. Stored privately on this computer.")
@@ -740,7 +752,19 @@ class MainWindow(QMainWindow):
         add_menu.addAction("Add files…", lambda: self._pick_locker_items(remote=False, folder=False))
         add_menu.addAction("Add a folder…", lambda: self._pick_locker_items(remote=False, folder=True))
         self.add_locker_files.setMenu(add_menu)
-        local_card.layout().insertWidget(2, self.add_locker_files)
+        self.local_manage = QPushButton("Manage selected…")
+        manage_menu = QMenu(self.local_manage)
+        self.rename_local_action = manage_menu.addAction("Rename…", self._rename_local)
+        self.trash_local_action = manage_menu.addAction("Move to Trash…", self._trash_local)
+        self.local_manage.setMenu(manage_menu)
+        local_actions = QHBoxLayout()
+        local_actions.addWidget(self.add_locker_files, 1)
+        local_actions.addWidget(self.local_manage, 1)
+        local_card.layout().insertLayout(2, local_actions)
+        for key, callback in (("F2", self._rename_local), ("Delete", self._trash_local)):
+            shortcut = QShortcut(QKeySequence(key), self.local_tree)
+            shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+            shortcut.activated.connect(callback)
         send_row = QHBoxLayout()
         self.send_files = QPushButton("Send files…")
         self.send_files.setObjectName("sendAction")
@@ -926,7 +950,15 @@ class MainWindow(QMainWindow):
 
     def _tree_menu(self, tree: LockerTree, point) -> None:
         remote = tree is self.remote_tree
+        clicked = tree.itemAt(point)
+        if clicked is not None and not clicked.isSelected():
+            tree.clearSelection()
+            tree.setCurrentItem(clicked)
         menu = QMenu(tree)
+        if not remote:
+            menu.addAction(self.rename_local_action)
+            menu.addAction(self.trash_local_action)
+            menu.addSeparator()
         buttons = (
             (self.download_peer, self.remote_home, self.remote_new_folder, self.save_folder)
             if remote else (self.upload_peer, self.local_home, self.local_inbox, self.local_new_folder)
@@ -936,6 +968,126 @@ class MainWindow(QMainWindow):
             action.setEnabled(button.isEnabled())
             action.triggered.connect(button.click)
         menu.exec(tree.viewport().mapToGlobal(point))
+
+    def _computer_menu(self, point) -> None:
+        item = self.computers.itemAt(point)
+        if item is None or self._locker_busy:
+            return
+        index = self.peer_combo.findData(item.data(Qt.ItemDataRole.UserRole))
+        if index < 0:
+            return
+        self.peer_combo.setCurrentIndex(index)
+        menu = QMenu(self.computers)
+        for button in (self.connect_peer, self.edit_peer, self.save_peer, self.delete_peer):
+            action = menu.addAction(button.text())
+            action.setEnabled(button.isEnabled())
+            action.triggered.connect(button.click)
+        menu.exec(self.computers.viewport().mapToGlobal(point))
+
+    def _rename_local(self) -> None:
+        items = self.local_tree.selectedItems()
+        if self._locker_busy or self.locker_config.read_only or len(items) != 1:
+            return
+        relative = items[0].data(0, Qt.ItemDataRole.UserRole)
+        name, accepted = QInputDialog.getText(self, "Rename item", "New name", text=posixpath.basename(relative))
+        if not accepted or name == posixpath.basename(relative):
+            return
+        try:
+            if not name.strip() or relative_path(name) != name or "/" in name:
+                raise ValueError("Enter a single file or folder name")
+            source = self.locker.resolve(relative)
+            target = self.locker.resolve(posixpath.join(posixpath.dirname(relative), name), must_exist=False)
+            if source == self.locker.root:
+                raise ValueError("The locker itself cannot be renamed")
+            # Qt refuses to overwrite an existing destination, including a racing create.
+            file = QFile(str(source))
+            if not file.rename(str(target)):
+                raise OSError(file.errorString())
+            self._refresh_local_locker()
+            self.locker_status.setText(f'Renamed to “{name}”.')
+        except (OSError, ValueError) as error:
+            self._locker_error(str(error))
+
+    def _trash_local(self) -> None:
+        items = self.local_tree.selectedItems()
+        if self._locker_busy or self.locker_config.read_only or not items:
+            return
+        paths = [item.data(0, Qt.ItemDataRole.UserRole) for item in items]
+        if not self._confirm("Move to Trash", f"Move {len(paths)} selected item(s) to Trash? "
+                             "Selected folders include all their contents. Restore them using your file manager."):
+            return
+        moved = 0
+        try:
+            for relative in paths:
+                source = self.locker.resolve(relative)
+                if source == self.locker.root:
+                    raise ValueError("The locker itself cannot be removed")
+                file = QFile(str(source))
+                if not file.moveToTrash():
+                    raise OSError(f"Could not move {source.name} to Trash: {file.errorString()}")
+                moved += 1
+            self.locker_status.setText(f"Moved {moved} item(s) to Trash.")
+        except (OSError, ValueError) as error:
+            self._locker_error(f"{moved} item(s) moved to Trash. {error}")
+        finally:
+            self._refresh_local_locker()
+
+    def _edit_profile(self, remote: bool) -> None:
+        if (remote and self._locker_busy) or (not remote and self._process is not None):
+            return
+        try:
+            profile = (self._saved_profile() if remote else next(
+                (p for p in self.profile_store.direct() if p.name == self.direct_profile.currentData()), None))
+            if profile is None:
+                return
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Edit saved computer")
+            dialog.setMinimumWidth(400)
+            layout = QVBoxLayout(dialog)
+            form = QFormLayout()
+            name = QLineEdit(profile.name)
+            address = QLineEdit(self._endpoint(Peer("", "", profile.address, profile.port)) if remote else profile.host)
+            form.addRow("Name", name)
+            form.addRow("Address and port" if remote else "SSH host", address)
+            folder = QLineEdit(profile.last_folder if remote else profile.remote_path)
+            form.addRow("Default folder", folder)
+            layout.addLayout(form)
+            error_label = QLabel()
+            error_label.setWordWrap(True)
+            layout.addWidget(error_label)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+            layout.addWidget(buttons)
+            buttons.rejected.connect(dialog.reject)
+
+            def save():
+                try:
+                    if remote:
+                        peer = parse_peer_address(address.text().strip())
+                        changed_endpoint = (peer.address, peer.port) != (profile.address, profile.port)
+                        updated = replace(profile, name=name.text().strip(), address=peer.address, port=peer.port,
+                                          last_folder=folder.text().strip(),
+                                          device_id="" if changed_endpoint else profile.device_id)
+                    else:
+                        updated = DirectProfile(name.text().strip(), address.text().strip(), folder.text().strip())
+                    self.profile_store.update_profile(profile.name, updated)
+                except (OSError, ValueError) as error:
+                    error_label.setText(str(error))
+                    return
+                dialog.accept()
+                if remote:
+                    self._disconnect_peer()
+                    self._update_peers(self._discovered)
+                    self.peer_combo.setCurrentIndex(self.peer_combo.findData(f"saved:{updated.name}"))
+                    self._peer_changed()
+                    self.locker_status.setText("Computer updated. Connect when ready.")
+                else:
+                    self._refresh_direct_profiles(updated.name)
+                    self._load_direct_profile()
+
+            buttons.accepted.connect(save)
+            dialog.exec()
+        except (OSError, ValueError) as error:
+            self._locker_error(str(error))
 
     def _toggle_history(self, shown: bool) -> None:
         self.activity_list.setVisible(shown)
@@ -1088,6 +1240,7 @@ class MainWindow(QMainWindow):
             return
         menu = QMenu(self.remote_folders)
         rename = menu.addAction("Rename favorite…")
+        edit_path = menu.addAction("Edit folder path…")
         remove = menu.addAction("Remove favorite")
         action = menu.exec(self.remote_folders.mapToGlobal(point))
         if action is None:
@@ -1106,9 +1259,16 @@ class MainWindow(QMainWindow):
                 if name in folders:
                     raise ValueError("Another favorite already has that name. Choose a different name.")
                 folders[name] = path
+            elif action == edit_path:
+                new_path, accepted = QInputDialog.getText(
+                    self, "Edit favorite folder", "Path inside this locker (empty for Home)", text=path)
+                if not accepted:
+                    return
+                folders[old_name] = relative_path(new_path.strip())
             elif action != remove:
                 return
-            folders.pop(old_name, None)
+            if action != edit_path:
+                folders.pop(old_name, None)
             self.profile_store.save_peer(replace(profile, folders=folders))
             self._refresh_saved_folders()
             self._update_locker_controls()
@@ -1313,9 +1473,13 @@ class MainWindow(QMainWindow):
         index = self.direct_profile.findData(selected)
         self.direct_profile.setCurrentIndex(max(index, 0))
         self.direct_profile.blockSignals(False)
+        self.edit_direct_profile.setEnabled(bool(self.direct_profile.currentData()))
+        self.delete_direct_profile.setEnabled(bool(self.direct_profile.currentData()))
 
     def _load_direct_profile(self) -> None:
         name = self.direct_profile.currentData()
+        self.edit_direct_profile.setEnabled(bool(name))
+        self.delete_direct_profile.setEnabled(bool(name))
         try:
             profile = next((item for item in self.profile_store.direct() if item.name == name), None)
         except (OSError, ValueError) as error:
@@ -1676,6 +1840,13 @@ class MainWindow(QMainWindow):
         ):
             widget.setEnabled(idle)
         self.computers.drop_enabled = idle
+        self.edit_peer.setEnabled(idle and str(self.peer_combo.currentData()).startswith("saved:"))
+        selected = self.local_tree.selectedItems()
+        editable = idle and not self.locker_config.read_only
+        self.local_manage.setText(f"Manage {len(selected)} selected…" if selected else "Manage selected…")
+        self.local_manage.setEnabled(editable and bool(selected))
+        self.rename_local_action.setEnabled(editable and len(selected) == 1)
+        self.trash_local_action.setEnabled(editable and bool(selected))
         self.delete_peer.setEnabled(idle and str(self.peer_combo.currentData()).startswith("saved:"))
         self.locker_drop.setEnabled(idle and not self.locker_config.read_only)
         self.remote_drop.setEnabled(idle and writable)
@@ -1694,6 +1865,8 @@ class MainWindow(QMainWindow):
         self.save_folder.setEnabled(idle and connected)
         self.remote_folders.setVisible(connected)
         self.save_folder.setVisible(connected)
+        self.edit_favorite.setVisible(connected)
+        self.edit_favorite.setEnabled(idle and connected and self.remote_folders.currentData() is not None)
         self.quick_save_peer.setVisible(connected)
         try:
             saved_profile = self._saved_profile()
@@ -2301,6 +2474,7 @@ class MainWindow(QMainWindow):
             self.dry_run,
             self.direct_profile,
             self.save_direct_profile,
+            self.edit_direct_profile,
             self.delete_direct_profile,
             self.paths,
             self.remove_paths,

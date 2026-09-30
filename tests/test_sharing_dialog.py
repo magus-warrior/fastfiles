@@ -75,6 +75,21 @@ class SharingDialogTests(unittest.TestCase):
         self.assertTrue(LockerConfig.load(self.path).uses_computer_keys)
         self.assertEqual(self.dialog.key_field.text(), "")
 
+    def test_edit_permissions_preserves_key_and_rejects_invalid_rules(self):
+        token = self.create()
+        self.dialog.name_edit.setText("Studio laptop")
+        self.dialog.download_edit.setPlainText("Photos/**")
+        self.click(self.dialog.update_button)
+        entry = authenticate_computer(token, self.config.computer_permissions)
+        self.assertEqual(entry["name"], "Studio laptop")
+        self.assertEqual(entry["download_patterns"], ["Photos/**"])
+        self.assertEqual(self.dialog.key_field.text(), "")
+        before = self.path.read_bytes()
+        self.dialog.download_edit.setPlainText("../outside")
+        self.click(self.dialog.update_button)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(authenticate_computer(token, self.config.computer_permissions), entry)
+
     def test_replacing_selected_computer_rotates_key_and_changes_folder_rules(self):
         token = self.create()
         self.assertTrue(self.dialog.replace_label.isVisible())

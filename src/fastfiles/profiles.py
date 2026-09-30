@@ -117,6 +117,18 @@ class ProfileStore:
         data["direct"] = [asdict(item) for item in sorted(profiles, key=lambda item: item.name.casefold())]
         self._write(data)
 
+    def update_profile(self, old_name: str, profile: DirectProfile | PeerProfile) -> None:
+        """Replace an existing profile in one write, preserving unrelated entries."""
+        key = "peers" if isinstance(profile, PeerProfile) else "direct"
+        data = self._read()
+        entries = data.get(key, [])
+        if not any(item["name"] == old_name for item in entries):
+            raise ValueError("This saved computer no longer exists")
+        if any(item["name"] == profile.name and item["name"] != old_name for item in entries):
+            raise ValueError("Another saved computer already has that name")
+        data[key] = [asdict(profile) if item["name"] == old_name else item for item in entries]
+        self._write(data)
+
     def delete_direct(self, name: str) -> None:
         data = self._read()
         data["direct"] = [asdict(item) for item in self.direct() if item.name != name]

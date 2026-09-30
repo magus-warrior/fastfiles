@@ -9,6 +9,25 @@ from fastfiles.profiles import DirectProfile, PeerProfile, ProfileStore
 
 
 class PersistenceTests(unittest.TestCase):
+    def test_rename_profile_preserves_metadata_and_rejects_collisions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = ProfileStore(Path(temporary) / "connections.json")
+            first = PeerProfile("Home", "home", 47832, "device", {"Photos": "photos"}, "photos")
+            store.save_peer(first)
+            store.save_peer(PeerProfile("Other", "other", 47832))
+            store.save_direct(DirectProfile("SSH", "host", "~/"))
+            before = store.path.read_bytes()
+            with self.assertRaises(ValueError):
+                store.update_profile("Home", replace(first, name="Other"))
+            self.assertEqual(store.path.read_bytes(), before)
+            updated = replace(first, name="Studio", address="studio")
+            store.update_profile("Home", updated)
+            self.assertEqual(next(p for p in store.peers() if p.name == "Studio"), updated)
+            self.assertEqual(len(store.peers()), 2)
+            self.assertEqual(len(store.direct()), 1)
+            with self.assertRaises(ValueError):
+                store.update_profile("Missing", first)
+
     def test_legacy_peer_profiles_load_with_empty_computer_metadata(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "connections.json"

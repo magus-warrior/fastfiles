@@ -63,6 +63,79 @@ class WindowTests(unittest.TestCase):
         self.app.processEvents()
         self.addCleanup(self.close_window)
 
+    def select_local(self, name):
+        self.window._refresh_local_locker()
+        tree = self.window.local_tree
+        tree.clearSelection()
+        for index in range(tree.topLevelItemCount()):
+            item = tree.topLevelItem(index)
+            if item.text(0) == name:
+                tree.setCurrentItem(item)
+                return item
+        self.fail(f"Missing local item: {name}")
+
+    def test_local_rename_preserves_contents_and_refuses_collisions(self):
+        root = self.window.locker.root
+        (root / "old").mkdir()
+        (root / "old" / "file.txt").write_text("keep")
+        self.select_local("old")
+        with patch("fastfiles.ui.QInputDialog.getText", return_value=("new", True)):
+            self.window._rename_local()
+        self.assertEqual((root / "new" / "file.txt").read_text(), "keep")
+        self.assertFalse((root / "old").exists())
+        (root / "existing").write_text("original")
+        self.select_local("new")
+        with patch("fastfiles.ui.QInputDialog.getText", return_value=("existing", True)):
+            self.window._rename_local()
+        self.assertTrue((root / "new").is_dir())
+        self.assertEqual((root / "existing").read_text(), "original")
+        with patch("fastfiles.ui.QInputDialog.getText", return_value=("../escape", True)):
+            self.window._rename_local()
+        self.assertTrue((root / "new").exists())
+
+    def test_saved_computer_editor_renames_without_losing_favorites(self):
+        from PySide6.QtWidgets import QDialogButtonBox, QLineEdit
+
+        profile = PeerProfile("Studio", "studio", 47832, "device", {"Photos": "photos"}, "photos")
+        self.window.profile_store.save_peer(profile)
+        self.window._update_peers([])
+        self.window.peer_combo.setCurrentIndex(self.window.peer_combo.findData("saved:Studio"))
+
+        def edit(dialog):
+            fields = dialog.findChildren(QLineEdit)
+            fields[0].setText("Office")
+            fields[2].setText("Inbox")
+            dialog.findChild(QDialogButtonBox).accepted.emit()
+
+        with patch("fastfiles.ui.QDialog.exec", edit):
+            self.window._edit_profile(True)
+        saved = self.window.profile_store.peers()
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0].name, "Office")
+        self.assertEqual(saved[0].folders, {"Photos": "photos"})
+        self.assertEqual(saved[0].last_folder, "Inbox")
+        self.assertEqual(self.window.peer_combo.currentData(), "saved:Office")
+
+    def test_local_trash_cancel_failure_and_read_only_preserve_file(self):
+        source = self.window.locker.root / "keep.txt"
+        source.write_text("keep")
+        self.select_local("keep.txt")
+        with patch.object(self.window, "_confirm", return_value=False), patch("fastfiles.ui.QFile") as file:
+            self.window._trash_local()
+            file.assert_not_called()
+        with patch.object(self.window, "_confirm", return_value=True), patch("fastfiles.ui.QFile") as file:
+            file.return_value.moveToTrash.return_value = False
+            file.return_value.errorString.return_value = "Trash unavailable"
+            self.window._trash_local()
+            file.return_value.moveToTrash.assert_called_once()
+        self.assertEqual(source.read_text(), "keep")
+        self.window.locker_config.read_only = True
+        with patch("fastfiles.ui.QInputDialog.getText") as prompt, patch.object(self.window, "_confirm") as confirm:
+            self.window._rename_local()
+            self.window._trash_local()
+            prompt.assert_not_called()
+            confirm.assert_not_called()
+
     def wait_for(self, predicate, timeout=5):
         deadline = time.monotonic() + timeout
         while not predicate() and time.monotonic() < deadline:

@@ -299,6 +299,21 @@ Offline saved machines stay selectable for edits and retries. **Update needed**
 means the remote FastFiles version is incompatible. Version 0.2 uses Locker
 protocol 2; update both computers with `git pull` followed by the installer.
 
+### Managing files and saved computers
+
+Select local files or folders and choose **Manage selected…** to rename an item
+or move selected items to the system Trash. F2 renames and Delete opens the Trash
+confirmation while the local file list has focus. Existing names are never
+overwritten; if Trash is unavailable, the item stays in place. These actions
+respect the locker's read-only setting. Remote file rename and deletion are not
+available through the current Locker protocol.
+
+Open the computer settings (**⋯ → Edit…**) to update a saved computer's name,
+address, or default folder. Favorites are preserved. Changing the address requires
+access for that endpoint; the old endpoint's credential is not copied to it.
+Saved SSH machines also have an **Edit…** button. Use **Edit favorite…** to rename
+a favorite, change its folder path, or remove the bookmark.
+
 ### Receive without the desktop app
 
 To keep a machine discoverable and receiving without a desktop or a GUI
@@ -361,7 +376,8 @@ for people; access follows possession of the issued key.
 
 The first computer grant disables the shared pairing code, so it cannot bypass
 the individual folder rules. Revoking the last computer key keeps pairing-code
-access disabled. Existing computer grants can be revoked, and the global
+access disabled. Existing computer grants can be renamed or edited with **Save name and permissions**
+without changing their access key. Grants can also be revoked, and the global
 allow/deny and read-only settings always apply in addition to each key's rules.
 To change a grant in the dialog, select it and use **Replace key and permissions**;
 the previous key stops working, so enter the replacement on that computer.
