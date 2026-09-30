@@ -169,6 +169,61 @@ class WindowTests(unittest.TestCase):
         self.app.sendEvent(area, drop)
         return drop.isAccepted()
 
+    def test_send_picker_copies_files_and_folders_without_locker_staging(self):
+        server, _ = self.server()
+        self.connect_server(server)
+        w = self.window
+        source = self.root / "From Downloads.txt"
+        source.write_text("sent directly")
+        folder = self.root / "Holiday"
+        (folder / "empty").mkdir(parents=True)
+        (folder / "photo.txt").write_text("photo")
+        from PySide6.QtWidgets import QFileDialog
+
+        for button, path, mode in ((w.send_files, source, QFileDialog.FileMode.ExistingFiles),
+                                   (w.send_folder, folder, QFileDialog.FileMode.Directory)):
+            with patch.object(w, "_path_dialog") as picker:
+                picker.return_value.exec.return_value = QFileDialog.DialogCode.Accepted
+                picker.return_value.selectedFiles.return_value = [str(path)]
+                button.click()
+                self.assertEqual(picker.call_args.args[1], mode)
+            self.wait_for(lambda: not w._locker_busy)
+            self.assertTrue((server.locker.root / path.name).exists())
+            self.assertFalse((w.locker.root / path.name).exists())
+        self.assertEqual((server.locker.root / source.name).read_text(), "sent directly")
+        self.assertTrue((server.locker.root / folder.name / "empty").is_dir())
+        self.assertTrue(source.exists())
+
+    def test_quick_send_requires_connection_and_writable_destination(self):
+        w = self.window
+        self.assertFalse(w.send_files.isEnabled())
+        self.assertFalse(w.send_folder.isEnabled())
+        self.assertIn("Open FastFiles on both", w.connection_summary.text())
+        server, _ = self.server()
+        self.connect_server(server)
+        self.assertTrue(w.send_files.isEnabled())
+        self.assertIn("Connected to", w.connection_summary.text())
+        w._remote_info["read_only"] = True
+        w._update_locker_controls()
+        self.assertFalse(w.send_files.isEnabled())
+        with patch.object(w, "_path_dialog") as picker:
+            w._pick_locker_items(remote=True, folder=False)
+        picker.assert_not_called()
+
+    def test_polished_layout_keeps_quick_actions_visible_at_both_sizes(self):
+        w = self.window
+        for width, height in ((1400, 960), (800, 600)):
+            w.resize(width, height)
+            self.app.processEvents()
+            self.assertEqual(w.locker_scroll.horizontalScrollBar().maximum(), 0)
+            for button in (w.send_files, w.send_folder, w.add_locker_files, w.connect_peer):
+                point = button.mapTo(w.locker_scroll.viewport(), QPoint(0, 0))
+                self.assertGreaterEqual(point.x(), 0)
+                self.assertGreaterEqual(point.y(), 0)
+                self.assertLessEqual(point.x() + button.width(), w.locker_scroll.viewport().width())
+                self.assertLessEqual(point.y() + button.height(), w.locker_scroll.viewport().height())
+        self.assertFalse(w.profile_options.isVisible())
+
     def test_direct_drop_queues_files_folders_and_receive_destination(self):
         w = self.window
         w.tabs.setCurrentIndex(1)
@@ -365,24 +420,76 @@ class WindowTests(unittest.TestCase):
         w._connect_peer()
         self.wait_for(lambda: not w._locker_busy)
         self.assertEqual(w.remote_relative, "Photos")
-        with patch("fastfiles.ui.QInputDialog.getText", return_value=("Family pictures", True)):
+        with patch("fastfiles.ui.QInputDialog.getText") as prompt:
             w._save_remote_folder()
+        prompt.assert_not_called()
         w._load_remote("Inbox")
         self.wait_for(lambda: not w._locker_busy)
         saved = w.profile_store.peers()[0]
-        self.assertEqual(saved.folders, {"Family pictures": "Photos"})
+        self.assertEqual(saved.folders, {"Photos": "Photos"})
         self.assertEqual(saved.last_folder, "Inbox")
         self.assertEqual(saved.device_id, "remote-test")
         w._disconnect_peer()
         w._connect_peer()
         self.wait_for(lambda: not w._locker_busy)
         self.assertEqual(w.remote_relative, "Inbox")
-        index = w.remote_folders.findText("Family pictures")
+        index = w.remote_folders.findText("Photos")
         self.assertGreater(index, 0)
         w.remote_folders.activated.emit(index)
         self.wait_for(lambda: not w._locker_busy)
         self.assertEqual(w.remote_relative, "Photos")
         self.assertEqual(w.profile_store.peers()[0].last_folder, "Photos")
+
+    def test_favorite_unsaved_computer_is_one_click_and_keeps_access_private(self):
+        server, _ = self.server()
+        (server.locker.root / "Photos").mkdir()
+        self.connect_server(server)
+        w = self.window
+        w._load_remote("Photos")
+        self.wait_for(lambda: not w._locker_busy)
+        with patch("fastfiles.ui.QInputDialog.getText") as prompt:
+            w.save_folder.click()
+        prompt.assert_not_called()
+        saved = w.profile_store.peers()[0]
+        self.assertEqual(saved.name, "Remote test")
+        self.assertEqual(saved.folders, {"Photos": "Photos"})
+        self.assertEqual(saved.last_folder, "Photos")
+        self.assertEqual(saved.device_id, "remote-test")
+        self.assertIsNotNone(w._connected_client)
+        self.assertEqual(w.remote_relative, "Photos")
+        w.secret_store.set.assert_called_with(saved.secret_id, "654321")
+        self.assertNotIn("654321", w.profile_store.path.read_text())
+        self.assertIn("Saved", w.quick_save_peer.text())
+        self.assertIn("Favorited", w.save_folder.text())
+        w.save_folder.click()
+        self.assertEqual(w.profile_store.peers()[0].folders, {})
+        self.assertTrue((server.locker.root / "Photos").is_dir())
+        self.assertEqual(len(w.profile_store.peers()), 1)
+
+    def test_one_click_save_keeps_computer_and_code_together_without_name_collisions(self):
+        server, _ = self.server()
+        w = self.window
+        w.profile_store.save_peer(PeerProfile("Remote test", "other.example", 47832))
+        self.connect_server(server)
+        w.quick_save_peer.click()
+        profiles = w.profile_store.peers()
+        self.assertEqual([profile.name for profile in profiles], ["Remote test", "Remote test (2)"])
+        self.assertEqual(profiles[0].address, "other.example")
+        w.secret_store.set.assert_called_with(profiles[1].secret_id, "654321")
+        self.assertEqual(len(w.profile_store.peers()), 2)
+
+    def test_favorites_with_same_basename_do_not_replace_each_other(self):
+        server, _ = self.server()
+        for path in ("Family/Photos", "Work/Photos"):
+            (server.locker.root / path).mkdir(parents=True)
+        self.connect_server(server)
+        w = self.window
+        for path in ("Family/Photos", "Work/Photos"):
+            w._load_remote(path)
+            self.wait_for(lambda: not w._locker_busy)
+            w.save_folder.click()
+        self.assertEqual(w.profile_store.peers()[0].folders,
+                         {"Photos": "Family/Photos", "Photos (2)": "Work/Photos"})
 
     def test_sidebar_drop_connects_with_remembered_key_and_uses_saved_folder(self):
         server, _ = self.server()
@@ -517,32 +624,23 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(w.profile_store.peers()[0].device_id, "previous-computer")
         self.assertFalse(w.remote_drop.isEnabled())
 
-    def test_successful_connection_remembers_updated_access_only_when_checked(self):
+    def test_successful_connection_updates_saved_access_but_rejects_bad_codes(self):
         server, _ = self.server()
         server.config.access_code = "987654"
         server.config.access_code_hash = hash_access_code("987654")
         w = self.window
         profile = self.save_computer(server)
         w.peer_combo.setCurrentIndex(w.peer_combo.findData(f"saved:{profile.name}"))
-        w.remember_code.setChecked(True)
         w.peer_code.setText("000000")
         w._connect_peer()
         self.wait_for(lambda: not w._locker_busy)
         self.assertIsNone(w._connected_client)
         w.secret_store.set.assert_not_called()
-        for remember in (False, True):
-            with self.subTest(remember=remember):
-                w._disconnect_peer()
-                w.secret_store.set.reset_mock()
-                w.remember_code.setChecked(remember)
-                w.peer_code.setText("987654")
-                w._connect_peer()
-                self.wait_for(lambda: not w._locker_busy)
-                self.assertIsNotNone(w._connected_client, w.locker_status.text())
-                if remember:
-                    w.secret_store.set.assert_called_once_with(profile.secret_id, "987654")
-                else:
-                    w.secret_store.set.assert_not_called()
+        w.peer_code.setText("987654")
+        w._connect_peer()
+        self.wait_for(lambda: not w._locker_busy)
+        self.assertIsNotNone(w._connected_client, w.locker_status.text())
+        w.secret_store.set.assert_called_once_with(profile.secret_id, "987654")
 
     def test_poll_rejects_changed_computer_identity_without_repinning_saved_alias(self):
         server, _ = self.server()

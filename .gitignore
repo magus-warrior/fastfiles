@@ -13,3 +13,14 @@ connections.json
 *.log
 *.log.*
 .ruff_cache/
+
+# Local runtime state and editor settings
+.fastfiles-*
+FastFiles Locker/
+.config/fastfiles/
+.vscode/
+.idea/
+core
+core.[0-9]*
+credentials.json
+credentials.key

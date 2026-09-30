@@ -136,20 +136,27 @@ class ProfileStore:
 
 
 class SecretStore:
-    """Store connection secrets in the desktop keyring, never in profile JSON."""
+    """Use the OS keyring, or an encrypted private vault on headless accounts."""
 
     service = "FastFiles"
 
+    def __init__(self):
+        from .credentials import CredentialVault
+
+        self.vault = CredentialVault()
+
     @staticmethod
     def available() -> bool:
-        try:
-            import keyring
-
-            return keyring.get_keyring().priority > 0
-        except Exception:
-            return False
+        return True
 
     def get(self, key: str) -> str:
+        # A fallback copy is newer than any keyring entry left while it was locked.
+        try:
+            value = self.vault.get(key)
+            if value or self.vault.contains(key):
+                return value
+        except (OSError, ValueError):
+            logger.warning("Saved access could not be unlocked")
         try:
             import keyring
 
@@ -158,17 +165,26 @@ class SecretStore:
             return ""
 
     def set(self, key: str, value: str) -> None:
-        import keyring
+        try:
+            import keyring
 
-        backend = keyring.get_keyring()
-        if backend.priority <= 0 or "plaintext" in type(backend).__name__.lower():
-            raise RuntimeError("No secure system keyring is available; the code will not be saved")
-        keyring.set_password(self.service, key, value)
+            backend = keyring.get_keyring()
+            if backend.priority <= 0 or "plaintext" in type(backend).__name__.lower():
+                raise RuntimeError("No secure keyring")
+            keyring.set_password(self.service, key, value)
+        except Exception:
+            self.vault.set(key, value)
+        else:
+            self.vault.delete(key)
 
     def delete(self, key: str) -> None:
+        # Keep an empty fallback tombstone if the OS keyring is unavailable, so
+        # an old credential cannot reappear when the keyring unlocks later.
         try:
             import keyring
 
             keyring.delete_password(self.service, key)
-        except Exception as error:
-            logger.warning("Could not remove keyring entry: %s", type(error).__name__)
+        except Exception:
+            self.vault.set(key, "")
+        else:
+            self.vault.delete(key)

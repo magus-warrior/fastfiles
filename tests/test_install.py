@@ -51,6 +51,8 @@ class InstallerTests(unittest.TestCase):
                 self.assertIn(package, calls)
                 if manager == "apt-get":
                     self.assertTrue(calls.startswith("update\n"))
+                    for dependency in ("libxkbcommon-x11-0", "libxcb-icccm4", "libxcb-keysyms1", "libxcb-xkb1"):
+                        self.assertIn(dependency, calls)
 
     def test_headless_and_satisfied_dependencies_skip_packages(self):
         for options in ({"headless": True}, {"missing": False}):

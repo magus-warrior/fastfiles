@@ -23,7 +23,7 @@ a separate paid license. See [Licensing](#licensing).
 - Side-by-side locker browsing with automatic folder refresh while idle
 - A Computers sidebar with memorable aliases and favorite folders per computer
 - Pairing codes or separate computer keys with download/upload folder permissions
-- Saved credentials in the desktop keyring; computer keys are hashed on the server
+- Saved credentials in the OS keyring or an encrypted local vault; computer keys are hashed on the server
 - Global allow/deny rules for controlling which locker paths are exposed
 - Saved IPs/hostnames with automatic Locker availability checks every 15 seconds
 - Explicit overwrite controls, cancellation, and empty-folder copies in Locker
@@ -53,7 +53,44 @@ The installer creates an isolated `.venv`, installs or updates FastFiles, checks
 the dependencies, runs the test suite, and adds **FastFiles** to your application
 launcher (desktop installs only). It is safe to run again after pulling
 an update. Arguments passed to `start.sh` are forwarded to FastFiles, so an
-always-on locker can also be started with `./start.sh --serve`.
+locker service can also be started with `./start.sh --serve`.
+
+### Terminal menu and always-on sharing
+
+Run `./start.sh` in a terminal to open the interactive menu. No flags are needed.
+Use `./start.sh --menu` to explicitly select the menu, or `./start.sh --gui` for
+the desktop window. Application-launcher shortcuts still open the desktop.
+The menu works with a headless installation and needs no Qt packages.
+
+The numbered menu lets you:
+
+- Start/stop sharing and display your connection details and pairing code
+- Copy files or whole folders into your Locker, or share an existing folder through Settings
+- Connect by LAN discovery, hostname, or IP address; send files and folders directly
+- Browse the other computer and receive selected items or an entire folder's contents
+- Change the shared folder, port, listen address, upload setting, and allow/deny rules
+- Grant/revoke computer keys, view transfer history, and run guided Direct SSH transfers
+
+Paths with spaces can be entered without quotes, one per line. Copies preserve
+empty folders and refuse to overwrite files unless you choose replacement.
+Ctrl+C cancels the current action; `0` quits. Foreground sharing stops on exit.
+Settings changes stop sharing so you can review the new scope before starting it.
+Locker still uses unencrypted HTTP; use a trusted LAN or an encrypted VPN.
+
+On Linux with systemd, choose **13 · Always-on sharing / startup** to enable
+sharing in the background and at login. It keeps running after the menu closes
+and restarts if the service fails. Choose **Also start at boot** to enable user
+lingering with sudo, so sharing starts before login and survives logout. Use the
+same menu to check status or disable the service. Disabling stops FastFiles and
+its automatic startup; it leaves the account's linger setting unchanged because
+other user services may use it. Run the menu as your normal user, not with sudo.
+Keep the checkout and its virtual environment in place while the service is enabled.
+Always-on controls currently require Linux/systemd; other platforms can use the
+foreground menu or `--serve`.
+
+If Qt cannot start, FastFiles reports the error instead of letting a failed
+platform-plugin load abort the main process. Rerun `./install.sh` to repair Linux
+desktop libraries, or use the terminal menu.
 
 ### Updating from Git
 
@@ -131,7 +168,7 @@ SSH backends. Locker needs neither Cygwin nor WSL.
 
 ### Linux desktop libraries
 
-On Linux, the desktop installer detects missing XCB cursor, EGL, and OpenGL
+On Linux, the desktop installer detects missing XCB cursor, keyboard/window-management, EGL, and OpenGL
 libraries and installs the system packages using apt, dnf, or pacman. It may ask
 for your sudo password (and package-manager confirmation). Other distributions
 receive a list of missing libraries to install manually. Headless installs skip
@@ -146,15 +183,15 @@ If startup reports that the Qt `xcb` plugin could not load and mentions
 
 ```bash
 # Ubuntu / Debian
-sudo apt install libxcb-cursor0
+sudo apt install libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-keysyms1 libxcb-xkb1
 # Fedora
-sudo dnf install xcb-util-cursor
+sudo dnf install xcb-util-cursor libxkbcommon-x11 xcb-util-wm xcb-util-keysyms
 # Arch Linux
-sudo pacman -S xcb-util-cursor
+sudo pacman -S xcb-util-cursor libxkbcommon-x11 xcb-util-wm xcb-util-keysyms
 ```
 
 Then run `./start.sh` again. If it still fails, run
-`QT_DEBUG_PLUGINS=1 ./start.sh` to identify other missing libraries or display
+`QT_DEBUG_PLUGINS=1 ./start.sh --gui` to identify other missing libraries or display
 connection errors. See [Qt's Linux requirements](https://doc.qt.io/qt-6/linux-requirements.html).
 The `--check` command checks only SSH tools; it does not verify GUI startup.
 
@@ -174,31 +211,54 @@ pip install -e '.[desktop]'
 fastfiles
 ```
 
+### Send files in a few clicks
+
+Open FastFiles on both computers. Choose the receiving computer, enter the code
+shown under **My pairing code** on that computer, and click **Connect**. Click
+**Send files…** or **Send folder…** to choose anything on your computer and send
+it directly to the destination displayed on the right. You do not need to add it
+to your Locker first. Drag-and-drop still works. **How it works** explains this
+inside the app, and the guide above the file lists shows the next step.
+
+Once connected, **Save computer** saves its address, name, and last visited
+folder in one click. **☆ Favorite folder** saves the open folder and its computer
+together, without naming dialogs. Open favorites from **Favorite folders**;
+click **★ Favorited** to remove a bookmark without deleting files. Right-click
+the favorite list to rename or remove a selected favorite. Names that already
+exist get a numbered suffix instead of replacing another computer or folder.
+Saving a computer or favorite also saves its access code automatically; there
+is no separate checkbox. Selecting the saved computer reconnects with that code. Addresses and favorites remain in your private local settings,
+not in the repository; access codes are never written into the saved-address file.
+
+The window now opens at up to 1400 × 960, adjusted to fit the screen. On smaller
+windows, computers remain available in the dropdown and the main send actions
+stay near the top. Saved-connection settings are under **⋯**.
+
 ### Choose a computer, then a folder
 
 Use **Save as…** to give a Locker connection a memorable alias such as “Laptop”
 or “Home server.” Saved and discovered computers appear in the **Computers**
 sidebar. Select a computer, enter its pairing code or computer key, and click
-**Connect**. Check **Remember access** when saving the computer to store its
-credential in the desktop keyring. Connecting to an already saved computer also
-updates its remembered credential when this box is checked.
+**Connect**. **Save computer** saves its address and credential together.
+Connecting to an already saved computer updates its credential after a successful
+connection. An incorrect code never replaces the saved one.
 Saved computers stay in the sidebar when offline and can be saved before their
 first connection.
 
-**My locker** shows this computer's shared files; **Computer locker** shows the
+**My shared files** shows this computer's shared files; **Send to this computer** shows the
 selected computer's permitted folders. Double-click a folder to browse it, use
 **Up** or **Home** to navigate, and **New** to create a destination where
 you have permission. **Save folder…** gives the remote folder an alias in that
-computer's **Saved folders** menu, available while connected. Each saved computer
+computer's **Favorite folders** menu, available while connected. Each saved computer
 remembers its last folder.
 
 In shorter windows, **⋯** opens the saved computer settings. Right-click a file
 pane for folder actions such as **Home**, **Inbox**, and **New**; the panes still
 accept drops when the separate drop areas are hidden.
 
-- Drop photos, files, or folders from your file manager into **My locker** to add
+- Drop photos, files, or folders from your file manager into **My shared files** to add
   copies to the local shared folder.
-- Drop them into **Computer locker** to send directly to the connected computer.
+- Drop them into **Send to this computer** to send directly to the connected computer.
 - Drag items between the two panes to send or receive copies. Ctrl/Shift-select
   several items, or use **Send selected** and **Receive selected**.
 - Drop files or local locker items onto a computer in the sidebar to send to its
@@ -295,7 +355,7 @@ patterns. For example, allow a laptop to download `Photos/**` and upload
 leave an operation's box empty to deny that operation.
 
 The owner sees each new key once. Enter it in the other computer's code/key
-field and use **Remember access** to store it in that computer's system keyring.
+field and save the computer to keep its access for future connections.
 The serving computer stores only a hash of the key. Names identify permissions
 for people; access follows possession of the issued key.
 
@@ -380,12 +440,20 @@ code is stored in the private local config so it can be displayed; it is not an
 encrypted transport or an internet-facing authentication system.
 
 Saved machine aliases, favorite folders, and last-used folders live in a separate
-mode-`0600` `connections.json`; remembered codes and computer keys go through the
-OS keyring. If a keyring is unavailable, addresses and folders can still be saved
-and the credential entered when connecting. Saving with **Remember access**
-unchecked removes the saved credential for that endpoint. Profiles with the
-same IP and port share a keyring entry. The GUI reports malformed profile JSON
-instead of overwriting it.
+mode-`0600` `connections.json`. Saving a computer or favorite saves its code as
+part of the same action. The terminal automatically saves a connection after
+successful authentication. Pairing codes can still be printed for initial setup;
+saved connections reuse their codes without repeatedly prompting or printing them.
+
+Credentials use the OS keyring when available. Headless or locked-keyring accounts
+use an encrypted vault in the private `fastfiles/private` settings directory,
+with a separate local encryption key. The directory is mode `0700` and the files
+are mode `0600` on POSIX; Windows uses the account's profile-directory permissions.
+Protect both the vault and its key: encryption does not protect against someone
+who controls your account. These files stay outside the repository and are ignored
+by Git. Forgetting a saved computer removes its stored access when no other saved
+alias uses the same endpoint. Profiles with the same IP and port share credentials.
+Malformed settings are reported instead of overwritten.
 
 ### Copy behavior and logs
 

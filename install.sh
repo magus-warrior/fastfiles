@@ -42,7 +42,8 @@ if [[ "${INSTALL_TARGET}" == *'[desktop]' && "$(uname -s)" == "Linux" ]]; then
     missing_libraries="$(python3 - <<'PYLIBS'
 import ctypes
 
-for library in ("libxcb-cursor.so.0", "libEGL.so.1", "libOpenGL.so.0"):
+for library in ("libxcb-cursor.so.0", "libEGL.so.1", "libOpenGL.so.0",
+                "libxkbcommon-x11.so.0", "libxcb-icccm.so.4", "libxcb-keysyms.so.1", "libxcb-xkb.so.1"):
     try:
         ctypes.CDLL(library)
     except OSError:
@@ -53,13 +54,13 @@ PYLIBS
         printf 'Missing libraries:\n%s\n' "${missing_libraries}"
         if command -v apt-get >/dev/null 2>&1; then
             package_manager=apt-get
-            packages=(libxcb-cursor0 libegl1 libopengl0)
+            packages=(libxcb-cursor0 libegl1 libopengl0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-keysyms1 libxcb-xkb1)
         elif command -v dnf >/dev/null 2>&1; then
             package_manager=dnf
-            packages=(xcb-util-cursor libglvnd-egl libglvnd-opengl)
+            packages=(xcb-util-cursor libglvnd-egl libglvnd-opengl libxkbcommon-x11 xcb-util-wm xcb-util-keysyms libxcb)
         elif command -v pacman >/dev/null 2>&1; then
             package_manager=pacman
-            packages=(xcb-util-cursor libglvnd)
+            packages=(xcb-util-cursor libglvnd libxkbcommon-x11 xcb-util-wm xcb-util-keysyms libxcb)
         else
             fail "Install the listed libraries with your distribution's package manager, then rerun ./install.sh."
         fi
@@ -84,7 +85,8 @@ PYLIBS
         esac
         python3 - <<'PYVERIFY' || fail "Desktop system libraries are still unavailable after package installation."
 import ctypes
-for library in ("libxcb-cursor.so.0", "libEGL.so.1", "libOpenGL.so.0"):
+for library in ("libxcb-cursor.so.0", "libEGL.so.1", "libOpenGL.so.0",
+                "libxkbcommon-x11.so.0", "libxcb-icccm.so.4", "libxcb-keysyms.so.1", "libxcb-xkb.so.1"):
     ctypes.CDLL(library)
 PYVERIFY
     fi

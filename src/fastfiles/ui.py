@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -100,7 +102,14 @@ QLabel#dropArea:disabled { color: #98a2b3; border-color: #dfe3eb; background: #f
 QLabel#notice { color: #8a5100; background: #fff5dd; border-radius: 6px; padding: 10px; }
 QLabel#error { color: #b42318; }
 QScrollArea { border: 0; background: #f5f7fb; }
-QPushButton { min-height: 22px; }
+QPushButton { min-height: 22px; text-transform: none; border-radius: 6px; }
+QPushButton#sendAction { background: #2563eb; color: white; border: 1px solid #2563eb; font-weight: 600; }
+QPushButton#sendAction:hover { background: #1d4ed8; }
+QPushButton#sendAction:disabled { background: #e8edf5; color: #7c879b; border-color: #e8edf5; }
+QLabel#guide { color: #344054; background: #edf4ff; border-radius: 7px; padding: 10px 12px; }
+QLabel#emptyState { color: #667085; padding: 18px; }
+QLabel#stepTitle { color: #172033; font-size: 17px; font-weight: 600; }
+QPushButton:focus { border: 2px solid #1d4ed8; }
 QComboBox, QLineEdit { min-height: 26px; }
 QTabWidget::pane { border: 0; }
 QTabBar::tab { min-width: 110px; padding: 14px 22px; }
@@ -200,8 +209,10 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self.setWindowTitle("FastFiles")
-        self.resize(1120, 840)
         self.setMinimumSize(800, 600)
+        available = self.screen().availableGeometry()
+        self.resize(min(1400, max(800, available.width() - 40)),
+                    min(960, max(600, available.height() - 60)))
         self._process: QProcess | None = None
         self._output_buffer = ""
         self._cancel_requested = False
@@ -536,18 +547,21 @@ class MainWindow(QMainWindow):
         outer.setSpacing(10)
         outer.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         heading = QHBoxLayout()
-        title = QLabel("Your lockers")
+        title = QLabel("Send files")
         title.setObjectName("title")
         heading.addWidget(title)
         heading.addStretch()
-        pair_toggle = QPushButton("Pair this computer")
+        help_button = QPushButton("How it works")
+        help_button.clicked.connect(self._show_locker_help)
+        heading.addWidget(help_button)
+        pair_toggle = self.pair_toggle = QPushButton("My pairing code")
         pair_toggle.setCheckable(True)
         heading.addWidget(pair_toggle)
-        self.sharing_settings = QPushButton("Sharing permissions…")
+        self.sharing_settings = QPushButton("Permissions…")
         self.sharing_settings.clicked.connect(self._show_sharing_settings)
         heading.addWidget(self.sharing_settings)
         outer.addLayout(heading)
-        subtitle = QLabel("Choose a computer. Browse its shared folders. Drag files to copy them.")
+        subtitle = QLabel("Connect to another computer, then choose files or a folder to send. Your originals stay here.")
         self.locker_subtitle = subtitle
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
@@ -584,12 +598,16 @@ class MainWindow(QMainWindow):
 
         body = QHBoxLayout()
         body.setSpacing(12)
-        sidebar = QWidget()
+        sidebar = self.computer_sidebar = QWidget()
         sidebar.setMinimumWidth(145)
         sidebar.setMaximumWidth(170)
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(0, 0, 0, 0)
-        side.addWidget(self._label("Computers"))
+        side.addWidget(self._label("Your computers"))
+        self.computers_hint = QLabel("Open FastFiles on the other computer. It will appear here on the same network.")
+        self.computers_hint.setObjectName("muted")
+        self.computers_hint.setWordWrap(True)
+        side.addWidget(self.computers_hint)
         self.computers = ComputerList()
         self.computers.drag_scope = self._drag_scope
         self.computers.setMinimumHeight(235)
@@ -598,7 +616,7 @@ class MainWindow(QMainWindow):
         self.computers.itemClicked.connect(self._computer_selected)
         self.computers.transfer_dropped.connect(self._drop_on_computer)
         side.addWidget(self.computers, 1)
-        self.check_peers = QPushButton("Check computers")
+        self.check_peers = QPushButton("Find computers")
         side.addWidget(self.check_peers)
         self.availability_label = QLabel("Saved computers remain here when offline.")
         self.availability_label.setObjectName("muted")
@@ -613,6 +631,7 @@ class MainWindow(QMainWindow):
         connection.setObjectName("card")
         connection_layout = QVBoxLayout(connection)
         connection_layout.setContentsMargins(12, 10, 12, 10)
+        connection_layout.addWidget(self._label("1  Choose the receiving computer"))
         peer_row = QHBoxLayout()
         self.peer_combo = QComboBox()
         self.peer_combo.setEditable(True)
@@ -620,17 +639,21 @@ class MainWindow(QMainWindow):
         self.peer_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.peer_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.peer_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.peer_combo.lineEdit().setPlaceholderText("Computer address or saved alias")
+        self.peer_combo.lineEdit().setPlaceholderText("Choose a computer or type its IP address")
         self.peer_code = QLineEdit()
-        self.peer_code.setPlaceholderText("Code or computer key")
+        self.peer_combo.setAccessibleName("Receiving computer name or IP address")
+        self.peer_code.setPlaceholderText("Pairing code")
+        self.peer_code.setAccessibleName("The other computer's pairing code or access key")
+        self.peer_code.setToolTip("On the other computer, click My pairing code. Enter that code here.")
         self.peer_code.setMaxLength(256)
         self.peer_code.setMinimumWidth(95)
         self.peer_code.setMaximumWidth(175)
         self.peer_code.setEchoMode(QLineEdit.EchoMode.Password)
         self.connect_peer = QPushButton("Connect")
+        self.connect_peer.setObjectName("sendAction")
         self.connection_options = QPushButton("⋯")
         self.connection_options.setCheckable(True)
-        self.connection_options.setChecked(True)
+        self.connection_options.setChecked(False)
         self.connection_options.setFixedWidth(38)
         self.connection_options.setToolTip("Saved computer settings")
         self.connection_options.setAccessibleName("Saved computer settings")
@@ -644,24 +667,22 @@ class MainWindow(QMainWindow):
         self.profile_options = QWidget()
         profile_row = QHBoxLayout(self.profile_options)
         profile_row.setContentsMargins(0, 0, 0, 0)
-        self.remember_code = QCheckBox("Remember access")
-        self.remember_code.setToolTip("Store this computer's code or key in the system keyring")
-        profile_row.addWidget(self.remember_code)
         profile_row.addStretch()
         profile_row.addWidget(self.save_peer)
         profile_row.addWidget(self.delete_peer)
         connection_layout.addWidget(self.profile_options)
+        self.profile_options.hide()
         self.connection_options.toggled.connect(self.profile_options.setVisible)
         workspace.addWidget(connection)
         self.connection_summary = QLabel("Select a saved computer, or enter an address and connect.")
         self.connection_summary.setWordWrap(True)
-        self.connection_summary.setObjectName("section")
+        self.connection_summary.setObjectName("guide")
         workspace.addWidget(self.connection_summary)
 
         browsers = QHBoxLayout()
         browsers.setSpacing(10)
-        local_card, self.local_tree, self.local_path_label, self.local_back = self._browser_card("My locker")
-        remote_card, self.remote_tree, self.remote_path_label, self.remote_back = self._browser_card("Computer locker")
+        local_card, self.local_tree, self.local_path_label, self.local_back = self._browser_card("My shared files")
+        remote_card, self.remote_tree, self.remote_path_label, self.remote_back = self._browser_card("2  Send to this computer")
         self.local_tree.side = "local"
         self.remote_tree.side = "remote"
         for tree in (self.local_tree, self.remote_tree):
@@ -675,7 +696,7 @@ class MainWindow(QMainWindow):
         local_tools.setContentsMargins(0, 0, 0, 0)
         self.local_home = QPushButton("Home")
         self.local_inbox = QPushButton("Inbox")
-        self.local_new_folder = QPushButton("New")
+        self.local_new_folder = QPushButton("New folder")
         self.local_new_folder.setToolTip("Create a folder in My locker")
         for button in (self.local_home, self.local_inbox, self.local_new_folder):
             local_tools.addWidget(button)
@@ -684,7 +705,7 @@ class MainWindow(QMainWindow):
         remote_tools = QHBoxLayout(self.remote_tools)
         remote_tools.setContentsMargins(0, 0, 0, 0)
         self.remote_home = QPushButton("Home")
-        self.remote_new_folder = QPushButton("New")
+        self.remote_new_folder = QPushButton("New folder")
         self.remote_new_folder.setToolTip("Create a folder on this computer")
         remote_tools.addWidget(self.remote_home)
         remote_tools.addWidget(self.remote_new_folder)
@@ -694,23 +715,46 @@ class MainWindow(QMainWindow):
         self.remote_folders.setMinimumContentsLength(5)
         self.remote_folders.setToolTip("Folders saved for this computer")
         self.remote_folders.activated.connect(self._open_saved_folder)
-        self.save_folder = QPushButton("Save folder…")
+        self.save_folder = QPushButton("☆ Favorite folder")
         self.save_folder.clicked.connect(self._save_remote_folder)
         folders_row = QHBoxLayout()
         folders_row.addWidget(self.remote_folders, 1)
         folders_row.addWidget(self.save_folder)
+        self.quick_save_peer = QPushButton("Save computer")
+        self.quick_save_peer.setToolTip("Save this computer, its access code, and its last folder together. Stored privately on this computer.")
+        self.quick_save_peer.clicked.connect(self._quick_save_computer)
+        folders_row.addWidget(self.quick_save_peer)
+        self.remote_folders.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.remote_folders.customContextMenuRequested.connect(self._favorite_menu)
         workspace.insertLayout(2, folders_row)
-        self.local_empty = QLabel("Drop photos, files or folders here to share them.")
+        self.local_empty = QLabel("Files here are available for connected computers to download. Adding files here does not send them.")
         self.remote_empty = QLabel("Connect to see this computer's shared files.")
         for label, card in ((self.local_empty, local_card), (self.remote_empty, remote_card)):
             label.setObjectName("muted")
             label.setWordWrap(True)
             card.layout().addWidget(label)
-        self.locker_drop = FileDropArea("Drop here to add to My locker")
+        self.remote_empty.setObjectName("emptyState")
+        self.remote_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.add_locker_files = QPushButton("Add files…")
+        add_menu = QMenu(self.add_locker_files)
+        add_menu.addAction("Add files…", lambda: self._pick_locker_items(remote=False, folder=False))
+        add_menu.addAction("Add a folder…", lambda: self._pick_locker_items(remote=False, folder=True))
+        self.add_locker_files.setMenu(add_menu)
+        local_card.layout().insertWidget(2, self.add_locker_files)
+        send_row = QHBoxLayout()
+        self.send_files = QPushButton("Send files…")
+        self.send_files.setObjectName("sendAction")
+        self.send_folder = QPushButton("Send folder…")
+        self.send_files.clicked.connect(lambda: self._pick_locker_items(remote=True, folder=False))
+        self.send_folder.clicked.connect(lambda: self._pick_locker_items(remote=True, folder=True))
+        send_row.addWidget(self.send_files, 1)
+        send_row.addWidget(self.send_folder, 1)
+        remote_card.layout().insertLayout(2, send_row)
+        self.locker_drop = FileDropArea("Or drop files here to share them")
         self.locker_drop.setMinimumHeight(36)
         self.locker_drop.paths_dropped.connect(self._drop_locker_paths)
         local_card.layout().addWidget(self.locker_drop)
-        self.remote_drop = FileDropArea("Drop here to send to this computer")
+        self.remote_drop = FileDropArea("Or drop files here to send them")
         self.remote_drop.setMinimumHeight(36)
         self.remote_drop.paths_dropped.connect(lambda paths: self._drop_external_remote(paths, self.remote_relative))
         remote_card.layout().addWidget(self.remote_drop)
@@ -742,8 +786,8 @@ class MainWindow(QMainWindow):
         self.copy_destination.setObjectName("section")
         footer.addWidget(self.copy_destination)
         actions = QHBoxLayout()
-        self.download_peer = QPushButton("← Receive selected")
-        self.upload_peer = QPushButton("Send selected →")
+        self.download_peer = QPushButton("Receive selected")
+        self.upload_peer = QPushButton("Send selected")
         self.download_peer.setEnabled(False)
         self.upload_peer.setEnabled(False)
         self.open_locker = QPushButton("Open folder")
@@ -762,7 +806,7 @@ class MainWindow(QMainWindow):
         options_row.addStretch()
         options_row.addWidget(history_toggle)
         footer.addLayout(options_row)
-        self.locker_status = QLabel("Ready to connect")
+        self.locker_status = QLabel("Choose a computer to get started.")
         self.locker_status.setObjectName("muted")
         self.locker_status.setWordWrap(True)
         self.locker_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -798,21 +842,87 @@ class MainWindow(QMainWindow):
             QUrl.fromLocalFile(str(self.locker.root / self.local_relative))))
         return container
 
+    def _pick_locker_items(self, *, remote: bool, folder: bool) -> None:
+        if self._locker_busy:
+            return
+        if remote and not self._remote_writable(self.remote_relative):
+            return
+        if not remote and self.locker_config.read_only:
+            return
+        noun = "a folder" if folder else "files"
+        destination = self._connected_client.peer.name if remote else "My shared files"
+        title = f"Choose {noun} to {'send to' if remote else 'add to'} {destination}"
+        mode = QFileDialog.FileMode.Directory if folder else QFileDialog.FileMode.ExistingFiles
+        dialog = self._path_dialog(title, mode)
+        dialog.setLabelText(QFileDialog.DialogLabel.Accept, "Send" if remote else "Add")
+        if dialog.exec() != QFileDialog.DialogCode.Accepted:
+            return
+        paths = dialog.selectedFiles()
+        if not paths:
+            return
+        if remote:
+            self._drop_external_remote(paths, self.remote_relative)
+        else:
+            self._import_paths(paths, self.local_relative)
+
+    def _update_connection_guide(self) -> None:
+        if self._locker_busy:
+            self.connection_summary.setText("Working… You can follow progress below or cancel the current action.")
+        elif self._connection_problem:
+            self.connection_summary.setText("Connection interrupted. Check that FastFiles is open on the other computer, then reconnect.")
+        elif self._connected_client:
+            name = self._connected_client.peer.name
+            if self._remote_writable(self.remote_relative):
+                self.connection_summary.setText(f"Connected to {name}. Choose Send files or Send folder — no need to add them to your Locker first.")
+            else:
+                self.connection_summary.setText(f"Connected to {name}. You can browse permitted files. To send, open a folder that allows uploads.")
+        elif self.peer_combo.currentText().strip():
+            self.connection_summary.setText("On the other computer, click My pairing code. Enter its code here, then click Connect.")
+        else:
+            self.connection_summary.setText("Open FastFiles on both computers. Choose the receiving computer from the list, or enter its IP address above.")
+
+    def _show_locker_help(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Send your first files")
+        dialog.setMinimumWidth(420)
+        dialog.setMaximumWidth(560)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(14)
+        for title, description in (
+            ("1  Open FastFiles on both computers", "Use the same trusted network or VPN. Choose the receiving computer from Your computers, or enter its IP address."),
+            ("2  Connect with its pairing code", "On the receiving computer, click My pairing code. Type that code on the sending computer and click Connect. If you were given an access key, use that instead."),
+            ("3  Choose files and send", "Click Send files or Send folder on the right. Your selection goes directly to the destination shown above it. You can also drag files there. Originals stay on the sending computer."),
+            ("What is My shared files?", "It is your Locker: files you make available for other computers to download. You do not need to put files there before sending them. To receive, select items on the right and click Receive selected."),
+        ):
+            heading = QLabel(title)
+            heading.setObjectName("stepTitle")
+            heading.setWordWrap(True)
+            label = QLabel(description)
+            label.setWordWrap(True)
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            layout.addWidget(heading)
+            layout.addWidget(label)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Got it")
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         if not hasattr(self, "remote_drop"):
             return
         compact = self.height() < 720
+        self.computer_sidebar.setVisible(self.width() >= 1150)
         self.locker_subtitle.setVisible(not compact)
         self.local_tools.setVisible(not compact)
-        self.remote_tools.setVisible(not compact)
+        self.remote_tools.setVisible(not compact and self._connected_client is not None)
         self.locker_drop.setVisible(not compact)
         self.remote_drop.setVisible(not compact)
         for tree in (self.local_tree, self.remote_tree):
             tree.setMinimumHeight(120 if compact else 180)
-        if compact != getattr(self, "_compact", None):
-            self.connection_options.setChecked(not compact)
-            self._compact = compact
+        self._compact = compact
 
     def _tree_menu(self, tree: LockerTree, point) -> None:
         remote = tree is self.remote_tree
@@ -881,7 +991,7 @@ class MainWindow(QMainWindow):
     def _refresh_saved_folders(self) -> None:
         self.remote_folders.blockSignals(True)
         self.remote_folders.clear()
-        self.remote_folders.addItem("Saved folders", None)
+        self.remote_folders.addItem("Favorite folders", None)
         try:
             profile = self._saved_profile()
             if profile:
@@ -889,6 +999,9 @@ class MainWindow(QMainWindow):
                     self.remote_folders.addItem(name, path)
         except (OSError, ValueError) as error:
             self.locker_status.setText(str(error))
+        index = self.remote_folders.findData(self.remote_relative)
+        if index >= 0:
+            self.remote_folders.setCurrentIndex(index)
         self.remote_folders.blockSignals(False)
 
     def _remember_remote_folder(self) -> None:
@@ -901,22 +1014,104 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as error:
             self.locker_status.setText(f"Could not remember this folder: {error}")
 
+    def _save_connected_computer(self) -> PeerProfile:
+        client = self._client()
+        profile = self._saved_profile()
+        profiles = self.profile_store.peers()
+        device_id = self._remote_info.get("device_id", "")
+        if profile is None:
+            profile = next((entry for entry in profiles if
+                            (entry.address, entry.port) == (client.peer.address, client.peer.port)
+                            and entry.device_id in ("", device_id)), None)
+        if profile is None:
+            reported_name = self._remote_info.get("device_name")
+            base = reported_name.strip() if isinstance(reported_name, str) and reported_name.strip() else client.peer.name
+            name = base
+            used = {entry.name.casefold() for entry in profiles}
+            number = 2
+            while name.casefold() in used:
+                name = f"{base} ({number})"
+                number += 1
+            profile = PeerProfile(name, client.peer.address, client.peer.port)
+        profile = replace(profile, device_id=device_id, last_folder=self.remote_relative)
+        self.secret_store.set(profile.secret_id, client.code)
+        self.profile_store.save_peer(profile)
+        self._update_peers(self._discovered)
+        self.peer_combo.blockSignals(True)
+        key = f"saved:{profile.name}"
+        self.peer_combo.setCurrentIndex(self.peer_combo.findData(key))
+        self.peer_combo.blockSignals(False)
+        self._selection_identity = (profile.address, profile.port, key)
+        client.peer = Peer(key, profile.name, profile.address, profile.port)
+        self._connected_client = client
+        self._refresh_saved_folders()
+        self._update_locker_controls()
+        return profile
+
+    def _quick_save_computer(self) -> None:
+        try:
+            profile = self._save_connected_computer()
+            self.locker_status.setText(f"{profile.name}, its access code, and last folder saved. Select it next time to connect.")
+        except (OSError, ValueError) as error:
+            self._locker_error(str(error))
+
     def _save_remote_folder(self) -> None:
+        if self._locker_busy or not self._connected_client:
+            return
+        try:
+            profile = self._save_connected_computer()
+            folders = dict(profile.folders)
+            existing = next((name for name, path in folders.items() if path == self.remote_relative), None)
+            if existing is not None:
+                del folders[existing]
+                message = "Favorite removed. The folder and its files are unchanged."
+            else:
+                base = posixpath.basename(self.remote_relative) or "Home"
+                name, number = base, 2
+                while name in folders:
+                    name = f"{base} ({number})"
+                    number += 1
+                folders[name] = self.remote_relative
+                message = f"{name} saved in Favorite folders. The computer is saved too."
+            self.profile_store.save_peer(replace(profile, folders=folders, last_folder=self.remote_relative))
+            self._refresh_saved_folders()
+            self._update_locker_controls()
+            self.locker_status.setText(message)
+        except (OSError, ValueError) as error:
+            self._locker_error(str(error))
+
+    def _favorite_menu(self, point) -> None:
+        if self._locker_busy:
+            return
+        path = self.remote_folders.currentData()
+        if path is None:
+            return
+        menu = QMenu(self.remote_folders)
+        rename = menu.addAction("Rename favorite…")
+        remove = menu.addAction("Remove favorite")
+        action = menu.exec(self.remote_folders.mapToGlobal(point))
+        if action is None:
+            return
         try:
             profile = self._saved_profile()
             if profile is None:
-                self._save_peer_profile()
-                profile = self._saved_profile()
-            if profile is None or self._connected_client is None:
                 return
-            name, accepted = QInputDialog.getText(
-                self, "Save folder", "Folder alias", text=posixpath.basename(self.remote_relative) or "Home")
-            if not accepted or not name.strip():
-                return
+            old_name = self.remote_folders.currentText()
             folders = dict(profile.folders)
-            folders[name.strip()] = self.remote_relative
-            self.profile_store.save_peer(replace(profile, folders=folders, last_folder=self.remote_relative))
+            if action == rename:
+                name, accepted = QInputDialog.getText(self, "Rename favorite", "Name", text=old_name)
+                name = name.strip()
+                if not accepted or not name or name == old_name:
+                    return
+                if name in folders:
+                    raise ValueError("Another favorite already has that name. Choose a different name.")
+                folders[name] = path
+            elif action != remove:
+                return
+            folders.pop(old_name, None)
+            self.profile_store.save_peer(replace(profile, folders=folders))
             self._refresh_saved_folders()
+            self._update_locker_controls()
         except (OSError, ValueError) as error:
             self._locker_error(str(error))
 
@@ -1167,7 +1362,7 @@ class MainWindow(QMainWindow):
         if not peer:
             self._locker_error("Enter or select a peer before saving it")
             return
-        name, accepted = QInputDialog.getText(self, "Save peer", "Alias", text=peer.name)
+        name, accepted = QInputDialog.getText(self, "Save computer as", "Computer name", text=peer.name)
         if not accepted or not name.strip():
             return
         code = self.peer_code.text().strip()
@@ -1179,27 +1374,17 @@ class MainWindow(QMainWindow):
             if self._connected_client:
                 profile = replace(profile, device_id=self._remote_info.get("device_id", ""), last_folder=self.remote_relative)
             existing = existing_profile is not None
-            if existing and not self._confirm(
+            if existing and (existing_profile.address, existing_profile.port) != (peer.address, peer.port) and not self._confirm(
                 "Replace saved machine", f"Replace the saved address for {profile.name}?"
             ):
                 return
-            if self.remember_code.isChecked() and not self._valid_credential(code):
-                raise ValueError("Enter a pairing code or computer key to remember it")
+            if not self._valid_credential(code):
+                raise ValueError("Enter the pairing code or access key so this computer can be saved with its access")
+            self.secret_store.set(profile.secret_id, code)
             self.profile_store.save_peer(profile)
         except (OSError, ValueError) as error:
             self._locker_error(str(error))
             return
-        if self.remember_code.isChecked():
-            try:
-                self.secret_store.set(profile.secret_id, code)
-            except Exception as error:
-                QMessageBox.warning(
-                    self,
-                    "Saved machine",
-                    f"Address saved. Code could not be stored in the system keyring ({type(error).__name__}). You can enter it when connecting.",
-                )
-        else:
-            self.secret_store.delete(profile.secret_id)
         self._update_peers(self._discovered)
         self.peer_combo.blockSignals(True)
         self.peer_combo.setCurrentIndex(self.peer_combo.findData(f"saved:{profile.name}"))
@@ -1258,7 +1443,7 @@ class MainWindow(QMainWindow):
         tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         layout.addLayout(header)
         layout.addWidget(path)
-        layout.addWidget(tree)
+        layout.addWidget(tree, 1)
         return card, tree, path, back
 
     @staticmethod
@@ -1305,7 +1490,7 @@ class MainWindow(QMainWindow):
             self._fill_tree(self.local_tree, self.locker.list(self.local_relative))
             self.local_tree.directory = self.local_relative
             self.local_tree.connection_id = str(self.locker.root)
-            self.local_path_label.setText("My locker / " + self.local_relative)
+            self.local_path_label.setText("Shared files / " + self.local_relative)
             self.local_path_label.setToolTip(str(self.locker.root / self.local_relative))
             self.local_empty.setVisible(self.local_tree.topLevelItemCount() == 0)
             self._update_locker_controls()
@@ -1379,6 +1564,7 @@ class MainWindow(QMainWindow):
             if peer.device_id == current_id:
                 self.computers.setCurrentItem(item)
         self.computers.blockSignals(False)
+        self.computers_hint.setVisible(not combined)
         self._peer_changed()
         self._update_locker_controls()
 
@@ -1399,7 +1585,7 @@ class MainWindow(QMainWindow):
         self.remote_tree._last_items = None
         self.remote_tree.connection_id = ""
         self.remote_path_label.setText("Not connected")
-        self.remote_empty.setText("Connect to a machine to see its files.")
+        self.remote_empty.setText("Your files arrive here.\nConnect to the other computer above, then choose Send files or Send folder.")
         self.remote_empty.show()
         self.locker_status.setText("Enter this computer’s pairing code or access key, then Connect.")
         self.connection_summary.setText("Not connected")
@@ -1420,12 +1606,10 @@ class MainWindow(QMainWindow):
         self._pending_drop = None
         self._disconnect_peer()
         self.peer_code.clear()
-        self.remember_code.setChecked(False)
         if peer and peer.device_id.startswith("saved:"):
             remembered = self.secret_store.get(f"peer:{peer.address}:{peer.port}")
             if remembered:
                 self.peer_code.setText(remembered)
-                self.remember_code.setChecked(True)
         self._refresh_saved_folders()
         self._update_locker_controls()
 
@@ -1487,7 +1671,7 @@ class MainWindow(QMainWindow):
         connected = self._connected_client is not None
         writable = self._remote_writable(self.remote_relative)
         for widget in (
-            self.peer_combo, self.peer_code, self.remember_code, self.connect_peer,
+            self.peer_combo, self.peer_code, self.connect_peer,
             self.save_peer, self.replace_files, self.computers, self.sharing_settings,
         ):
             widget.setEnabled(idle)
@@ -1510,8 +1694,33 @@ class MainWindow(QMainWindow):
         self.save_folder.setEnabled(idle and connected)
         self.remote_folders.setVisible(connected)
         self.save_folder.setVisible(connected)
+        self.quick_save_peer.setVisible(connected)
+        try:
+            saved_profile = self._saved_profile()
+        except (OSError, ValueError):
+            saved_profile = None
+        self.quick_save_peer.setEnabled(idle and connected and saved_profile is None)
+        self.quick_save_peer.setText("✓ Saved" if saved_profile else "Save computer")
+        favorite = saved_profile is not None and self.remote_relative in saved_profile.folders.values()
+        self.save_folder.setText("★ Favorited" if favorite else "☆ Favorite folder")
+        self.save_folder.setToolTip("Click to remove this favorite" if favorite else
+                                   "Save this folder and computer in one click. Right-click the favorite list to rename it.")
         self.refresh_lockers.setEnabled(idle)
         self.cancel_locker.setEnabled(self._locker_busy and not self._locker_cancel.is_set())
+        self.cancel_locker.setVisible(self._locker_busy)
+        self.locker_progress.setVisible(self._locker_busy or self.locker_progress.value() > 0)
+        self.send_files.setEnabled(idle and writable)
+        self.send_folder.setEnabled(idle and writable)
+        self.add_locker_files.setEnabled(idle and not self.locker_config.read_only)
+        self.remote_tree.setVisible(connected)
+        self.remote_empty.setMinimumHeight(0 if connected else 100)
+        self.remote_empty.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                        QSizePolicy.Policy.Preferred if connected else QSizePolicy.Policy.Expanding)
+        self.remote_tools.setVisible(connected and self.height() >= 720)
+        self.remote_empty.setVisible(not connected or self.remote_tree.topLevelItemCount() == 0)
+        if not connected:
+            self.remote_empty.setText("Your files arrive here.\nConnect above, then choose files or a whole folder to send.")
+        self._update_connection_guide()
         upload_names = [posixpath.basename(item.data(0, Qt.ItemDataRole.UserRole)) for item in self.local_tree.selectedItems()]
         self.upload_peer.setEnabled(idle and bool(upload_names) and self._upload_targets_allowed(upload_names, self.remote_relative))
         downloadable = bool(self.remote_tree.selectedItems()) and all(
@@ -1521,10 +1730,18 @@ class MainWindow(QMainWindow):
         self.download_peer.setEnabled(
             idle and connected and not self._connection_problem and not self.locker_config.read_only and downloadable)
         self.copy_destination.setText(
-            f"Receive into My locker/{self.local_relative} · Send into "
-            f"{self._connected_client.peer.name}/{self.remote_relative}" if connected else
-            f"Add files to My locker/{self.local_relative} to make them available to permitted computers."
+            f"Sending to {self._connected_client.peer.name} / {self.remote_relative or 'Shared files'}"
+            f"  ·  Receive into My shared files / {self.local_relative or 'Home'}" if connected else
+            "Connect above to send files. Or add files on the left for others to download."
         )
+        selected_count = len(upload_names)
+        self.upload_peer.setText(f"Send {selected_count} selected" if selected_count else "Send selected")
+        received_count = len(self.remote_tree.selectedItems())
+        self.download_peer.setText(f"Receive {received_count} selected" if received_count else "Receive selected")
+        self.upload_peer.setToolTip("Select files from My shared files to send to the open folder on the right.")
+        self.download_peer.setToolTip("Select files on the right to copy into the open folder on the left.")
+        self.send_files.setToolTip("Choose files anywhere on this computer and send them directly to the destination above.")
+        self.send_folder.setToolTip("Send a whole folder, including its contents, directly to the destination above.")
         self.locker_drop.setToolTip(str(self.locker.root / self.local_relative))
         if connected:
             self.remote_drop.setToolTip(f"Copy to {self._connected_client.peer.name}/{self.remote_relative}")
@@ -1614,7 +1831,7 @@ class MainWindow(QMainWindow):
         if self._connected_client:
             self.remote_tree.connection_id = self._endpoint(self._connected_client.peer)
         root = self._remote_info.get("locker_path", "/")
-        self.remote_path_label.setText("Computer locker / " + relative)
+        self.remote_path_label.setText("Destination: /" + relative)
         self.remote_path_label.setToolTip(posixpath.join(root, relative))
         self._fill_tree(self.remote_tree, items)
         upload_only = not self._remote_info.get("can_download", True)
@@ -1742,11 +1959,11 @@ class MainWindow(QMainWindow):
             self._refresh_saved_folders()
             try:
                 profile = self._saved_profile()
-                if profile and self.remember_code.isChecked():
+                if profile:
                     self.secret_store.set(profile.secret_id, self._connected_client.code)
             except Exception as error:
                 self.incoming_notice.setText(
-                    f"Connected, but access could not be remembered in the system keyring ({type(error).__name__}).")
+                    f"Connected, but updated access could not be saved ({type(error).__name__}).")
                 self.incoming_notice.show()
             logger.info(
                 "Connected endpoint=%s remote_root=%s", self._endpoint(peer), self._remote_info["locker_path"]

@@ -26,6 +26,9 @@ def check_environment() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Share a Locker or transfer files over SSH")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--menu", action="store_true", help="open the interactive terminal menu")
+    mode.add_argument("--gui", action="store_true", help="open the desktop window")
     parser.add_argument("--check", action="store_true", help="check required command-line tools")
     parser.add_argument("--serve", action="store_true", help="run the LAN locker service without the GUI")
     parser.add_argument("--port", type=int, help="override the configured locker port (default: 47832)")
@@ -61,6 +64,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--download and --upload require --grant-computer")
     if args.grant_computer is not None and not (args.download or args.upload):
         parser.error("Grant at least one --download or --upload pattern, for example --upload 'Inbox/**'")
+    if (args.menu or args.gui) and (
+        managing_access or args.serve or args.check or args.init_config or args.check_config or args.activity
+    ):
+        parser.error("Choose the menu or desktop separately from command-line actions")
     if args.check:
         return check_environment()
     from .locker import LockerConfig, LockerService
@@ -152,6 +159,18 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             service.stop()
         return 0
+
+    from .terminal import run_menu
+
+    if args.menu or (not args.gui and sys.stdin is not None and sys.stdin.isatty()):
+        return run_menu(config, config_path, advertise=not args.no_discovery)
+
+    from .desktop import desktop_error
+
+    error = desktop_error()
+    if error:
+        print(f"FastFiles: {error}\nUse ./start.sh --menu for terminal mode.", file=sys.stderr)
+        return 2
 
     try:
         from PySide6.QtGui import QIcon
